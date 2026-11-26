@@ -1,0 +1,200 @@
+[
+  {
+    "file": "maps/two_rooms.wad",
+    "map": "MAP01",
+    "stage": 1,
+    "split": "train"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP01",
+    "stage": 5,
+    "split": "train"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP02",
+    "stage": 5,
+    "split": "held_out"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP03",
+    "stage": 5,
+    "split": "train"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP04",
+    "stage": 5,
+    "split": "train"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP05",
+    "stage": 5,
+    "split": "train"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP06",
+    "stage": 5,
+    "split": "held_out"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP07",
+    "stage": 5,
+    "split": "train"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP08",
+    "stage": 5,
+    "split": "train"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP09",
+    "stage": 5,
+    "split": "held_out"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP10",
+    "stage": 5,
+    "split": "train"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP11",
+    "stage": 5,
+    "split": "train"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP12",
+    "stage": 5,
+    "split": "train"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP13",
+    "stage": 5,
+    "split": "train"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP14",
+    "stage": 5,
+    "split": "held_out"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP15",
+    "stage": 5,
+    "split": "train"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP16",
+    "stage": 5,
+    "split": "train"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP17",
+    "stage": 5,
+    "split": "train"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP18",
+    "stage": 5,
+    "split": "train"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP19",
+    "stage": 5,
+    "split": "train"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP20",
+    "stage": 5,
+    "split": "held_out"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP21",
+    "stage": 5,
+    "split": "train"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP22",
+    "stage": 5,
+    "split": "train"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP23",
+    "stage": 5,
+    "split": "train"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP24",
+    "stage": 5,
+    "split": "train"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP25",
+    "stage": 5,
+    "split": "train"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP26",
+    "stage": 5,
+    "split": "train"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP27",
+    "stage": 5,
+    "split": "held_out"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP28",
+    "stage": 5,
+    "split": "train"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP29",
+    "stage": 5,
+    "split": "train"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP30",
+    "stage": 5,
+    "split": "train"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP31",
+    "stage": 5,
+    "split": "train"
+  },
+  {
+    "file": "freedoom2.wad",
+    "map": "MAP32",
+    "stage": 5,
+    "split": "train"
+  }
+]
