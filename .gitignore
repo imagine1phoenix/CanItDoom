@@ -229,8 +229,14 @@ _vizdoom.ini
 # Tool and agent configurations
 .kilo/
 
-# Training checkpoints (large transient files)
+# Training checkpoints, logs, and evaluation outputs (large transient files)
 checkpoints/
+train/checkpoints/
+train/runs/
+replays/
+eval_results.csv
+gameplay.mp4
+test_doom.py
 
 
 
