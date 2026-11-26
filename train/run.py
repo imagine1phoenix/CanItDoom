@@ -32,6 +32,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from doom_env import make_env
+from submission.memory import mask_memory_state
 from submission.model import DoomActorCritic
 from train.ppo import RewardShaper, collate_obs
 from train.vec_env import SubprocVecEnv
@@ -340,6 +341,8 @@ def run_training(
         obs_batch = [r.reset(seed=i) for i, r in enumerate(runners)]
 
     hx = model.initial_state(batch_size=num_envs, device=device)
+    mem_state = model.initial_memory(batch_size=num_envs, device=device)
+    prev_action = torch.zeros(num_envs, 9, device=device)
 
     print("\n" + "=" * 105)
     print(f"{'Time':<8} | {'Stage':<5} | {'Step':<9} | {'SPS':<6} | {'Return':<7} | {'Exit%':<6} | {'Kills':<5} | {'PiLoss':<7} | {'VLoss':<7} | {'Ent':<6}")
@@ -370,6 +373,7 @@ def run_training(
                 iteration += 1
                 mb_obs, mb_actions, mb_log_probs = [], [], []
                 mb_rewards, mb_dones, mb_values = [], [], []
+                mb_mem_grids, mb_mem_landmarks, mb_mem_odoms = [], [], []
                 init_hx = hx.clone()
 
                 # Rollout collection
@@ -381,7 +385,13 @@ def run_training(
                     tensor_obs = collate_obs(obs_batch, device)
 
                     with torch.no_grad():
-                        action, log_prob, _, val, hx = model.step(tensor_obs, hx, deterministic=False)
+                        action, log_prob, _, val, hx, mem_state = model.step_with_memory(
+                            tensor_obs, hx, mem_state, prev_action=prev_action, deterministic=False
+                        )
+
+                    mb_mem_grids.append(mem_state.grid)
+                    mb_mem_landmarks.append(mem_state.landmarks)
+                    mb_mem_odoms.append(mem_state.odom_pose)
 
                     actions_np = action.cpu().numpy().astype(np.int8)
                     if vec_env is not None:
@@ -408,18 +418,25 @@ def run_training(
                                 recent_exits.append(1.0 if info.get("exit_reached") else 0.0)
                                 recent_kills.append(info.get("kills", 0))
 
+                    done_t = torch.tensor(dones, device=device, dtype=torch.float32)
+                    keep_mask = 1.0 - done_t
+                    mem_state = mask_memory_state(mem_state, keep_mask)
+                    prev_action = action * keep_mask.unsqueeze(-1)
+
                     mb_obs.append(tensor_obs)
                     mb_actions.append(action)
                     mb_log_probs.append(log_prob)
                     mb_rewards.append(torch.tensor(rewards, device=device, dtype=torch.float32))
-                    mb_dones.append(torch.tensor(dones, device=device, dtype=torch.float32))
+                    mb_dones.append(done_t)
                     mb_values.append(val)
                     obs_batch = next_obs
 
                 # GAE computation
                 final_obs = collate_obs(obs_batch, device)
                 with torch.no_grad():
-                    _, _, _, next_val, _ = model.step(final_obs, hx)
+                    _, _, _, next_val, _, _ = model.step_with_memory(
+                        final_obs, hx, mem_state, prev_action=prev_action
+                    )
 
                 advantages = torch.zeros(rollout_len, num_envs, device=device)
                 last_gae = 0.0
@@ -452,12 +469,21 @@ def run_training(
                     "vitals": torch.stack([o["vitals"] for o in mb_obs], dim=1),
                 }
                 b_dones_seq = torch.stack(mb_dones, dim=1)
+                b_mem_grids = torch.stack(mb_mem_grids, dim=1)
+                b_mem_landmarks = torch.stack(mb_mem_landmarks, dim=1)
+                b_mem_odoms = torch.stack(mb_mem_odoms, dim=1)
 
                 # Optimization epochs
                 model.train()
                 for _ in range(epochs):
                     new_log_probs, entropy, new_values = model.evaluate_sequence(
-                        b_obs_seq, init_hx, b_actions, done_mask_seq=(1.0 - b_dones_seq)
+                        b_obs_seq,
+                        init_hx,
+                        b_actions,
+                        done_mask_seq=(1.0 - b_dones_seq),
+                        mem_grids_seq=b_mem_grids,
+                        mem_landmarks_seq=b_mem_landmarks,
+                        mem_odom_seq=b_mem_odoms,
                     )
 
                     ratio = torch.exp(new_log_probs - b_old_log_probs)
