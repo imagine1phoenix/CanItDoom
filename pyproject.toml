@@ -9,6 +9,7 @@ dependencies = [
     "vizdoom==1.3.3",
     "gymnasium>=1.0",
     "numpy>=2.0",
+    "torch>=2.15.0",
 ]
 
 [dependency-groups]
