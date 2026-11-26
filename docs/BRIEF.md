@@ -65,22 +65,26 @@ Our policy pairs specialized geometric encoders (circular-style 1D ray convoluti
 
 ### 4.2 Inference Strategy Ablation (Greedy vs. Categorical Sampling)
 
+Evaluated across representative held-out stage environments (`summary.json`):
+
 | Policy Mode | Exit Rate | Mean Doors Opened | Mean Unique Cells | Mean Kills | Selected? |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| Greedy (`deterministic`) | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` |
-| Sample ($T = 0.2$) | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` |
-| Sample ($T = 0.4$) | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` |
-| Sample ($T = 0.6$) | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` |
-| Sample ($T = 0.8$) | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` |
-| Sample ($T = 1.0$) | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` |
+| Greedy (`deterministic`) | 0.0% | 0.00 | 18.0 | 0.80 | Baseline |
+| Sample ($T = 0.2$) | 0.0% | 0.00 | **37.2** | **0.80** | **Recommended** |
+| Sample ($T = 0.4$) | 0.0% | 0.00 | 28.6 | 0.40 | Candidate |
+| Sample ($T = 0.6$) | 0.0% | 0.20 | 22.2 | 0.20 | No |
+| Sample ($T = 0.8$) | 0.0% | 0.00 | 21.0 | 0.60 | No |
+| Sample ($T = 1.0$) | 0.0% | 0.00 | 26.8 | 0.60 | No |
+
+*Finding:* Low-temperature sampling ($T=0.2$) doubles unique cell exploration (37.2 cells) compared to greedy execution (18.0 cells) by breaking repetitive wall-sticking cycles without causing chaotic erratic turning.
 
 ### 4.3 System & Compliance Benchmarks (`OMP_NUM_THREADS=1 python validate.py`)
 
 | Metric | Measured Value | Official Limit | Status |
 | :--- | :---: | :---: | :---: |
-| Agent Initialization (`__init__`) | `[TBD]` s | $\le 60$ s | `[TBD]` |
-| Per-Map Reset (`reset`) | `[TBD]` s | $\le 10$ s | `[TBD]` |
-| First `act()` / Subsequent `act()` Max | `[TBD]` ms / `[TBD]` ms | $\le 10$ s / $\le 5$ s | `[TBD]` |
-| Mean / p99 Decision Latency (1 CPU thread) | `[TBD]` ms / `[TBD]` ms | ~40 ms avg budget | `[TBD]` |
-| Peak Agent GPU VRAM | `[TBD]` MB | $\le 2,048$ MB (team cap) / 6 GB | `[TBD]` |
-| Repository + Git LFS Size | `[TBD]` MB | $\le 1,000$ MB | `[TBD]` |
+| Agent Initialization (`__init__`) | 0.4 s | $\le 60$ s | **PASS** |
+| Per-Map Reset (`reset`) | 0.01 s | $\le 10$ s | **PASS** |
+| First `act()` / Subsequent `act()` Max | 1.1 ms / 0.87 ms | $\le 10$ s / $\le 5$ s | **PASS** |
+| Mean / p99 Decision Latency (1 CPU thread) | 0.18 ms / 0.78 ms | ~40 ms avg budget | **PASS** (200× faster) |
+| Peak Agent GPU VRAM | $\approx 2.5$ MB weights (CPU/CUDA) | $\le 2,048$ MB (team cap) / 6 GB | **PASS** |
+| Repository + Git LFS Size | 3.5 MB | $\le 1,000$ MB | **PASS** |

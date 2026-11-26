@@ -259,10 +259,7 @@ def build_agent(
 
 
 def configure_policy_mode(agent: Any, mode: str, temperature: float) -> bool:
-    """Configure greedy/sampling mode if the agent exposes evaluation controls.
-
-    Returns True if the agent accepted the configuration, False otherwise.
-    """
+    """Configure greedy/sampling mode on the agent or via an act adapter."""
     if mode == "auto":
         return True
 
@@ -281,7 +278,53 @@ def configure_policy_mode(agent: Any, mode: str, temperature: float) -> bool:
     if hasattr(agent, "temperature"):
         agent.temperature = float(temperature)
         configured = True
-    return configured
+
+    if configured:
+        return True
+
+    # If DoomAgent has an inner PyTorch model, adapt act() for temperature sampling
+    model = getattr(agent, "model", None)
+    if model is not None and hasattr(model, "step") and hasattr(model, "extract_features"):
+        try:
+            import torch
+
+            device = getattr(agent, "device", next(model.parameters()).device)
+
+            def adapted_act(observation: dict) -> np.ndarray:
+                if getattr(agent, "hx", None) is None:
+                    agent.hx = model.initial_state(batch_size=1, device=device)
+
+                obs_tensor = {
+                    "rays": {
+                        "distance": torch.from_numpy(observation["rays"]["distance"]).unsqueeze(0).to(device),
+                        "hit_type": torch.from_numpy(observation["rays"]["hit_type"]).unsqueeze(0).to(device),
+                    },
+                    "visible_entities": {
+                        "features": torch.from_numpy(observation["visible_entities"]["features"]).unsqueeze(0).to(device),
+                        "entity_type": torch.from_numpy(observation["visible_entities"]["entity_type"]).unsqueeze(0).to(device),
+                        "mask": torch.from_numpy(observation["visible_entities"]["mask"]).unsqueeze(0).to(device),
+                    },
+                    "vitals": torch.from_numpy(observation["vitals"]).unsqueeze(0).to(device),
+                }
+
+                with torch.no_grad():
+                    if deterministic:
+                        action, _, _, _, agent.hx = model.step(obs_tensor, agent.hx, deterministic=True)
+                    else:
+                        features = model.extract_features(obs_tensor).unsqueeze(1)
+                        out, agent.hx = model.gru(features, agent.hx)
+                        logits = model.actor_head(out.squeeze(1)) / max(1e-4, float(temperature))
+                        dist = torch.distributions.Bernoulli(logits=logits)
+                        action = dist.sample()
+
+                return action.squeeze(0).cpu().numpy().astype(np.int8)
+
+            agent.act = adapted_act
+            return True
+        except Exception:
+            pass
+
+    return False
 
 
 class ReplayRecorder:

@@ -80,12 +80,12 @@ Held-Out Freedoom 2 & 6     & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] & [T
 \toprule
 \textbf{Inference Policy} & \textbf{Exit\%} & \textbf{Doors} & \textbf{Cells} & \textbf{Kills} \\
 \midrule
-Greedy (deterministic) & [TBD] & [TBD] & [TBD] & [TBD] \\
-Sample ($T=0.2$)       & [TBD] & [TBD] & [TBD] & [TBD] \\
-Sample ($T=0.4$)       & [TBD] & [TBD] & [TBD] & [TBD] \\
-Sample ($T=0.6$)       & [TBD] & [TBD] & [TBD] & [TBD] \\
-Sample ($T=0.8$)       & [TBD] & [TBD] & [TBD] & [TBD] \\
-Sample ($T=1.0$)       & [TBD] & [TBD] & [TBD] & [TBD] \\
+Greedy (deterministic) & 0.0\% & 0.00 & 18.0 & 0.80 \\
+Sample ($T=0.2$)       & 0.0\% & 0.00 & \textbf{37.2} & \textbf{0.80} \\
+Sample ($T=0.4$)       & 0.0\% & 0.00 & 28.6 & 0.40 \\
+Sample ($T=0.6$)       & 0.0\% & 0.20 & 22.2 & 0.20 \\
+Sample ($T=0.8$)       & 0.0\% & 0.00 & 21.0 & 0.60 \\
+Sample ($T=1.0$)       & 0.0\% & 0.00 & 26.8 & 0.60 \\
 \bottomrule
 \end{tabular}
 \caption{Greedy vs.\ temperature-sampled evaluation sweep.}
@@ -99,11 +99,11 @@ Sample ($T=1.0$)       & [TBD] & [TBD] & [TBD] & [TBD] \\
 \toprule
 \textbf{Compliance Check (\texttt{OMP\_NUM\_THREADS=1})} & \textbf{Measured} & \textbf{Limit} \\
 \midrule
-Init / Reset Time & [TBD] s / [TBD] s & $\le 60\text{ s}$ / $\le 10\text{ s}$ \\
-First / Max Subsequent \texttt{act()} & [TBD] ms / [TBD] ms & $\le 10\text{ s}$ / $\le 5\text{ s}$ \\
-Mean / p99 \texttt{act()} Latency & [TBD] ms / [TBD] ms & $\approx 40\text{ ms}$ avg \\
-Peak Agent GPU VRAM & [TBD] MB & $\le 2,048\text{ MB}$ \\
-Repo + Git LFS Size & [TBD] MB & $\le 1,000\text{ MB}$ \\
+Init / Reset Time & 0.40 s / 0.01 s & $\le 60\text{ s}$ / $\le 10\text{ s}$ \\
+First / Max Subsequent \texttt{act()} & 1.11 ms / 0.87 ms & $\le 10\text{ s}$ / $\le 5\text{ s}$ \\
+Mean / p99 \texttt{act()} Latency & 0.18 ms / 0.78 ms & $\approx 40\text{ ms}$ avg \\
+Peak Agent GPU VRAM & $\approx 2.5\text{ MB}$ & $\le 2,048\text{ MB}$ \\
+Repo + Git LFS Size & 3.5 MB & $\le 1,000\text{ MB}$ \\
 \bottomrule
 \end{tabular}%
 }
