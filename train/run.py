@@ -351,6 +351,7 @@ def run_training(
                         dones.append(done)
 
                         if done:
+                            hx[:, i, :] = 0.0
                             recent_returns.append(info["ep_return"])
                             recent_lens.append(info["ep_len"])
                             recent_exits.append(1.0 if info.get("exit_reached") else 0.0)

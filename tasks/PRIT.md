@@ -28,18 +28,13 @@ Prit owns all code and systems that directly decide the competition score:
 
 ## 2. Granular Task Checklist
 
-- [ ] **Task P.1 — Observation Encoders:** Build PyTorch modules in `submission/model.py` for `rays`, `visible_entities`, and `vitals`.
-  - *Done when:* Encoders output clean embeddings and pass shape tests with batch and time dimensions.
-- [ ] **Task P.2 — Recurrent Core & Actor-Critic Heads:** Implement GRU recurrent trunk + categorical/multi-binary actor head and value critic head.
-  - *Done when:* Forward pass operates on `(batch, seq_len, ...)` and hidden state shape is verified.
-- [ ] **Task P.3 — Vectorized PPO Algorithm:** Implement recurrent PPO in `train/ppo.py` with GAE ($\lambda=0.95, \gamma=0.99$) and orthogonal weight initialization.
-  - *Done when:* Training on `maps/two_rooms.wad` yields monotonically increasing episode returns by 19:00 Thu.
-- [ ] **Task P.4 — Procedural Map Generator:** Write `train/mapgen.py` capable of writing UDMF map files with variable room counts, doors, and monster spawns.
-  - *Done when:* Surbhi can generate map batches with CLI options by 19:30 Thu.
+- [x] **Task P.1 — Observation Encoders:** Build PyTorch modules in `submission/model.py` for `rays`, `visible_entities`, and `vitals`. *(Done)*
+- [x] **Task P.2 — Recurrent Core & Actor-Critic Heads:** Implement GRU recurrent trunk + categorical/multi-binary actor head and value critic head. *(Done)*
+- [x] **Task P.3 — Vectorized PPO Algorithm:** Implement recurrent PPO in `train/ppo.py` with GAE ($\lambda=0.95, \gamma=0.99$) and orthogonal weight initialization. *(Done)*
+- [x] **Task P.4 — Procedural Map Generator:** Write `train/mapgen.py` capable of writing UDMF map files with variable room counts, doors, and monster spawns. *(Done)*
 - [ ] **Task P.5 — Relative Odometry & Landmark Memory (V1):** Integrate relative position tracking from ego velocities ($v_x, v_y, \text{turn}$) using $\sin$/$\cos$.
   - *Done when:* Replay trajectories match internal map representation by 22:00 Thu (fallback: freeze V0).
-- [ ] **Task P.6 — Production `DoomAgent` Implementation:** Wire trained weights into `submission/agent.py`, ensure device portability (`cpu`/`cuda`), and verify average inference latency $\le 40\text{ ms}$.
-  - *Done when:* `validate.py` passes with zero warnings.
+- [x] **Task P.6 — Production `DoomAgent` Implementation:** Wire trained weights into `submission/agent.py`, ensure device portability (`cpu`/`cuda`), and verify average inference latency $\le 40\text{ ms}$. *(Done)*
 
 ---
 

@@ -86,15 +86,18 @@ class EntityEncoder(nn.Module):
         h = self.fc(x)  # (B, 32, 64)
         h = h * m       # zero-out invalid slots
         
-        # Masked mean pooling
-        counts = torch.clamp(m.sum(dim=1), min=1.0)
-        mean_pool = h.sum(dim=1) / counts  # (B, 64)
-        
+        # Masked mean and max pooling
+        valid_counts = m.sum(dim=1)  # (B, 1)
+        has_entities = valid_counts > 0  # (B, 1)
+        counts = torch.clamp(valid_counts, min=1.0)
+
+        mean_pool = torch.where(has_entities, h.sum(dim=1) / counts, torch.zeros_like(h[:, 0, :]))  # (B, 64)
+
         # Masked max pooling (replace masked elements with large negative value)
         large_neg = -1e9 * (1.0 - m)
-        max_pool = (h + large_neg).max(dim=1)[0]
-        max_pool = torch.where(counts > 0, max_pool, torch.zeros_like(max_pool))  # (B, 64)
-        
+        raw_max = (h + large_neg).max(dim=1)[0]
+        max_pool = torch.where(has_entities, raw_max, torch.zeros_like(raw_max))  # (B, 64)
+
         pooled = torch.cat([mean_pool, max_pool], dim=-1)  # (B, 128)
         out = self.out_proj(pooled)
         return out.view(*orig_shape, -1)
