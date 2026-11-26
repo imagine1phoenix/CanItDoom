@@ -320,15 +320,15 @@ class DoomActorCritic(nn.Module):
         )
 
         # Specialist neural cluster
-        # Nav: 24 (clearances/wall) + 3 (vel) + 4 (visitation quadrants) + 9 (prev_action) = 40
+        # Nav: 24 (clearances/wall) + 3 (vel) + 4 (visitation quadrants) + 9 (prev_action) + 4 (std_door) + 4 (locked_door) + 3 (door_lm) + 3 (locked_lm) = 54
         # Enemy: 32 (enemy_ent) + 4 (enemy_ray) + 8 (combat vitals) + 8 (sector clearances) + 9 (prev_action) = 61
-        # Door: 4 (std) + 4 (locked) + 9 (dist) + 9 (flag) + 6 (keys) + 1 (has_key) + 1 (speed) + 9 (prev_action) = 43
+        # Door: 4 (std) + 4 (locked) + 9 (dist) + 9 (flag) + 6 (keys) + 1 (has_key) + 1 (speed) + 9 (prev_action) + 3 (door_lm) + 3 (locked_lm) = 49
         # Progression: 32 (item_ent) + 4 (item_ray) + 4 (locked_ray) + 9 (vitals) + 6 (landmarks) + 9 (prev_action) = 64
         self.experts = nn.ModuleDict(
             {
-                "nav": SpecialistExpert(domain_dim=40, gru_dim=hidden_dim, num_actions=num_actions),
+                "nav": SpecialistExpert(domain_dim=54, gru_dim=hidden_dim, num_actions=num_actions),
                 "enemy": SpecialistExpert(domain_dim=61, gru_dim=hidden_dim, num_actions=num_actions),
-                "door": SpecialistExpert(domain_dim=43, gru_dim=hidden_dim, num_actions=num_actions),
+                "door": SpecialistExpert(domain_dim=49, gru_dim=hidden_dim, num_actions=num_actions),
                 "progression": SpecialistExpert(domain_dim=64, gru_dim=hidden_dim, num_actions=num_actions),
             }
         )
@@ -454,7 +454,40 @@ class DoomActorCritic(nn.Module):
         norm_v = normalize_vitals(obs["vitals"])
         lead_shape = dist.shape[:-1]
 
-        # 1. Nav domain: 8-sector clearances + wall density + ego vel + 4 visitation quadrants + prev_action
+        # Shared ray-based door features
+        std_door = nearest_ray_features(dist, ht, 2, self.ray_cos, self.ray_sin)
+        locked_door = nearest_ray_features(dist, ht, 3, self.ray_cos, self.ray_sin)
+
+        # Nearest remembered standard door, locked door & item from spatial memory
+        dist2 = mem_landmarks[..., 0] ** 2 + mem_landmarks[..., 1] ** 2
+
+        # Standard door landmark (cls_idx == 3 in mem_landmarks[..., 3])
+        door_mask = (mem_landmarks[..., 3] > 0.5) & (mem_landmarks[..., 2] > 0.5)
+        d2_d = torch.where(door_mask, dist2, torch.full_like(dist2, 1e6))
+        min_dd, idx_d = d2_d.min(dim=-1, keepdim=True)
+        has_d = (min_dd < 1e5).float()
+        fwd_d = mem_landmarks[..., 0].gather(-1, idx_d) * has_d
+        side_d = mem_landmarks[..., 1].gather(-1, idx_d) * has_d
+        door_lm = torch.cat([has_d, fwd_d, side_d], dim=-1)
+
+        # Locked door landmark (cls_idx == 4 in mem_landmarks[..., 4])
+        locked_mask = (mem_landmarks[..., 4] > 0.5) & (mem_landmarks[..., 2] > 0.5)
+        d2_l = torch.where(locked_mask, dist2, torch.full_like(dist2, 1e6))
+        min_dl, idx_l = d2_l.min(dim=-1, keepdim=True)
+        has_l = (min_dl < 1e5).float()
+        fwd_l = mem_landmarks[..., 0].gather(-1, idx_l) * has_l
+        side_l = mem_landmarks[..., 1].gather(-1, idx_l) * has_l
+        locked_lm = torch.cat([has_l, fwd_l, side_l], dim=-1)
+
+        # Item/pickup landmark (cls_idx == 5 in mem_landmarks[..., 5])
+        item_mask = (mem_landmarks[..., 5] > 0.5) & (mem_landmarks[..., 2] > 0.5)
+        d2_i = torch.where(item_mask, dist2, torch.full_like(dist2, 1e6))
+        min_di, idx_i = d2_i.min(dim=-1, keepdim=True)
+        has_i = (min_di < 1e5).float()
+        fwd_i = mem_landmarks[..., 0].gather(-1, idx_i) * has_i
+        side_i = mem_landmarks[..., 1].gather(-1, idx_i) * has_i
+
+        # 1. Nav domain: 8-sector clearances + wall density + ego vel + 4 visitation quadrants + prev_action + door perception (54-d)
         dist_sec = dist.view(*lead_shape, 8, 8)
         wall_sec = (ht == 1).float().view(*lead_shape, 8, 8)
         ch0 = mem_grid[..., 0, :, :]
@@ -471,11 +504,15 @@ class DoomActorCritic(nn.Module):
                 norm_v[..., 14:17],
                 vis_quad,
                 prev_action,
+                std_door,
+                locked_door,
+                door_lm,
+                locked_lm,
             ],
             dim=-1,
         )
 
-        # 2. Enemy domain: hostile/projectile entities + nearest enemy ray + combat vitals + 8-sector clearances + prev_action
+        # 2. Enemy domain: hostile/projectile entities + nearest enemy ray + combat vitals + 8-sector clearances + prev_action (61-d)
         enemy_ent = self.enemy_entity_encoder(
             obs["visible_entities"]["features"],
             obs["visible_entities"]["entity_type"],
@@ -484,20 +521,29 @@ class DoomActorCritic(nn.Module):
         enemy_ray = nearest_ray_features(dist, ht, 4, self.ray_cos, self.ray_sin)
         enemy_in = torch.cat([enemy_ent, enemy_ray, norm_v[..., 0:8], dist_sec.min(dim=-1)[0], prev_action], dim=-1)
 
-        # 3. Door domain: std/locked door rays + 9-ray front cone + keys + speed + prev_action
-        std_door = nearest_ray_features(dist, ht, 2, self.ray_cos, self.ray_sin)
-        locked_door = nearest_ray_features(dist, ht, 3, self.ray_cos, self.ray_sin)
+        # 3. Door domain: std/locked door rays + 9-ray front cone + keys + speed + prev_action + door landmarks (49-d)
         front_dist = torch.cat([dist[..., -4:], dist[..., :5]], dim=-1)
         front_ht = torch.cat([ht[..., -4:], ht[..., :5]], dim=-1)
         front_is_door = ((front_ht == 2) | (front_ht == 3)).float()
         has_key = norm_v[..., 8:14].max(dim=-1, keepdim=True)[0]
         speed = torch.sqrt(norm_v[..., 14:15] ** 2 + norm_v[..., 15:16] ** 2 + 1e-6)
         door_in = torch.cat(
-            [std_door, locked_door, front_dist, front_is_door, norm_v[..., 8:14], has_key, speed, prev_action],
+            [
+                std_door,
+                locked_door,
+                front_dist,
+                front_is_door,
+                norm_v[..., 8:14],
+                has_key,
+                speed,
+                prev_action,
+                door_lm,
+                locked_lm,
+            ],
             dim=-1,
         )
 
-        # 4. Progression domain: item entities + item/locked rays + keys + landmark slots + prev_action
+        # 4. Progression domain: item entities + item/locked rays + keys + landmark slots + prev_action (64-d)
         item_ent = self.item_entity_encoder(
             obs["visible_entities"]["features"],
             obs["visible_entities"]["entity_type"],
@@ -505,23 +551,6 @@ class DoomActorCritic(nn.Module):
         )
         item_ray = nearest_ray_features(dist, ht, 5, self.ray_cos, self.ray_sin)
         prog_vitals = torch.cat([norm_v[..., 8:14], norm_v[..., 0:2], norm_v[..., 3:4]], dim=-1)
-
-        # Nearest remembered locked door & item from spatial memory
-        locked_mask = (mem_landmarks[..., 4] > 0.5) & (mem_landmarks[..., 2] > 0.5)
-        dist2 = mem_landmarks[..., 0] ** 2 + mem_landmarks[..., 1] ** 2
-        d2_l = torch.where(locked_mask, dist2, torch.full_like(dist2, 1e6))
-        min_dl, idx_l = d2_l.min(dim=-1, keepdim=True)
-        has_l = (min_dl < 1e5).float()
-        fwd_l = mem_landmarks[..., 0].gather(-1, idx_l) * has_l
-        side_l = mem_landmarks[..., 1].gather(-1, idx_l) * has_l
-
-        item_mask = (mem_landmarks[..., 5] > 0.5) & (mem_landmarks[..., 2] > 0.5)
-        d2_i = torch.where(item_mask, dist2, torch.full_like(dist2, 1e6))
-        min_di, idx_i = d2_i.min(dim=-1, keepdim=True)
-        has_i = (min_di < 1e5).float()
-        fwd_i = mem_landmarks[..., 0].gather(-1, idx_i) * has_i
-        side_i = mem_landmarks[..., 1].gather(-1, idx_i) * has_i
-
         lm_feat = torch.cat([has_l, fwd_l, side_l, has_i, fwd_i, side_i], dim=-1)
         prog_in = torch.cat([item_ent, item_ray, locked_door, prog_vitals, lm_feat, prev_action], dim=-1)
 

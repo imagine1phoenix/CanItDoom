@@ -77,15 +77,19 @@ class ExpertSpeedrunTeacher:
         self.wp_idx = 0
         self.last_enemy_dir = 0
         self.enemy_pursuit_timer = 0
+        self.p_in: tuple[float, float] | None = None
+        self.p_out: tuple[float, float] | None = None
         self.plan_waypoints()
 
     def plan_waypoints(self) -> None:
+        is_two_rooms = "two_rooms" in str(getattr(self.env, "wad", ""))
         self.wps = []
         exit_pos = self.sec_centers.get(3, (900.0, 300.0))
-        is_two_rooms = exit_pos[0] < 800.0
 
         if is_two_rooms:
             self.door_idx = 0
+            self.p_in = (480.0, 352.0)
+            self.p_out = (540.0, 352.0)
             self.wps = [
                 (430.0, 352.0),  # In front of door west
                 (540.0, 352.0),  # Past door east
@@ -104,10 +108,21 @@ class ExpertSpeedrunTeacher:
                         self.door_idx = 1
                         break
 
-            p_door_in = self.portals.get((0, 2), (480.0, 240.0))
-            p_door_out = self.portals.get((1, 2), (540.0, 240.0))
-            self.wps.append((p_door_in[0] - 25.0, p_door_in[1]))
-            self.wps.append((p_door_out[0] + 25.0, p_door_out[1]))
+            lines = self.env.mapinfo.lines
+            p_in, p_out = None, None
+            for i in range(len(lines.front)):
+                f, b = int(lines.front[i]), int(lines.back[i])
+                pair = (min(f, b), max(f, b))
+                mid = (float((lines.p1[i, 0] + lines.p2[i, 0]) / 2), float((lines.p1[i, 1] + lines.p2[i, 1]) / 2))
+                if pair == (0, 2) and p_in is None:
+                    p_in = mid
+                elif pair == (1, 2) and p_out is None:
+                    p_out = mid
+
+            self.p_in = p_in or (450.0, 240.0)
+            self.p_out = p_out or (540.0, 240.0)
+            self.wps.append((self.p_in[0] - 12.0, self.p_in[1]))
+            self.wps.append((self.p_out[0] + 30.0, self.p_out[1]))
             self.wps.append(exit_pos)
 
         self.wp_idx = 0
@@ -125,6 +140,15 @@ class ExpertSpeedrunTeacher:
         priv = self.env.privileged_state()
         px, py, pang = priv["x"], priv["y"], priv["angle"]
         v_ents = obs["visible_entities"]
+
+        # World-state based waypoint progression
+        has_key = any(priv.get("keys", np.zeros(6)) > 0)
+        if self.door_idx == 1 and has_key and self.wp_idx < 1:
+            self.wp_idx = 1
+        if self.p_in is not None and px > self.p_in[0] and self.wp_idx <= self.door_idx:
+            self.wp_idx = self.door_idx + 1
+        if self.p_out is not None and px >= self.p_out[0] - 5.0 and self.wp_idx < len(self.wps) - 1:
+            self.wp_idx = len(self.wps) - 1
 
         enemy_active = False
         door_active = False
@@ -184,24 +208,37 @@ class ExpertSpeedrunTeacher:
             else:
                 action[5] = 1  # TURN_RIGHT around corner
 
-        # In combat mode: prioritize eliminating enemies before advancing to the exit pad!
+        # In combat mode: prioritize eliminating enemies before advancing!
         if enemy_active:
             return action, EXPERT_ENEMY
 
         ceil = priv.get("sector_ceiling")
         has_door = 2 in self.env.mapinfo.door_sectors
+        door_opened = (not has_door) or (ceil is not None and len(ceil) > 2 and ceil[2] >= 100.0)
 
-        if has_door:
-            lines = self.env.mapinfo.sector_lines().get(2, np.zeros((0, 4)))
-            if len(lines):
-                d_x = lines[:, [0, 2]].mean()
-                d_y = lines[:, [1, 3]].mean()
-                door_dist = math.hypot(d_x - px, d_y - py)
-                if door_dist < 90.0:
-                    door_active = True
-                if door_dist < 110.0 and self.use_cooldown == 0:
+        d_x = self.wps[self.door_idx][0] + 12.0 if 0 <= self.door_idx < len(self.wps) else 450.0
+        d_y = self.wps[self.door_idx][1] if 0 <= self.door_idx < len(self.wps) else 240.0
+        door_dist = math.hypot(d_x - px, d_y - py)
+
+        tx, ty = self.wps[self.wp_idx]
+        dx, dy = tx - px, ty - py
+        t_ang = (math.degrees(math.atan2(dy, dx))) % 360.0
+        ang_diff = (t_ang - pang + 180.0) % 360.0 - 180.0
+
+        # Normal vector to door is east (+X, angle 0)
+        facing_east_err = (0.0 - pang + 180.0) % 360.0 - 180.0
+
+        if has_door and not door_opened and self.wp_idx == self.door_idx:
+            door_active = True
+            if door_dist < 40.0:
+                ang_diff = facing_east_err
+                if abs(facing_east_err) < 30.0 and self.use_cooldown == 0:
                     action[7] = 1  # USE
-                    self.use_cooldown = 14
+                    self.use_cooldown = 30  # ~2.5s cooldown so door never bounces!
+            else:
+                if door_dist < 60.0 and abs(ang_diff) < 30.0 and abs(facing_east_err) < 45.0 and self.use_cooldown == 0:
+                    action[7] = 1  # USE
+                    self.use_cooldown = 30
 
         if self.use_cooldown > 0:
             door_active = True
@@ -212,45 +249,40 @@ class ExpertSpeedrunTeacher:
         ray_dist = obs["rays"]["distance"]
         if (self.door_idx > 0 and self.wp_idx < self.door_idx) or np.any((ray_ht == 5) & (ray_dist < 0.35)):
             prog_active = True
-        if np.any(((ray_ht == 2) | (ray_ht == 3)) & (ray_dist < 0.09)):
-            door_active = True
 
-        # Advance along waypoints
-        while self.wp_idx < len(self.wps):
-            tx, ty = self.wps[self.wp_idx]
-            dist = math.hypot(tx - px, ty - py)
-            if self.wp_idx == self.door_idx and has_door and ceil is not None and len(ceil) > 2 and ceil[2] < 100.0:
-                break
-            if dist < 42.0:
-                self.wp_idx += 1
-            else:
-                break
-
-        if self.wp_idx < len(self.wps):
-            tx, ty = self.wps[self.wp_idx]
-            dx, dy = tx - px, ty - py
-            t_ang = (math.degrees(math.atan2(dy, dx))) % 360.0
-            ang_diff = (t_ang - pang + 180.0) % 360.0 - 180.0
-
-            action[0] = 1  # MOVE_FORWARD
-            action[8] = 1  # SPEED (sprint)
-
-            if ang_diff > 12.0:
-                action[4] = 1  # TURN_LEFT
-            elif ang_diff < -12.0:
-                action[5] = 1  # TURN_RIGHT
-
-            # Sharp turn braking to prevent overshoot
-            if abs(ang_diff) > 75.0:
+        if has_door and not door_opened and self.wp_idx == self.door_idx:
+            # At door waiting for it to open: hold position so we don't wall-slide away
+            if door_dist < 35.0:
                 action[0] = 0
+                action[8] = 0
+            else:
+                action[0] = 1
+                action[8] = 1
         else:
+            # Advance along waypoints
+            dist_to_wp = math.hypot(tx - px, ty - py)
+            if dist_to_wp < 40.0 and self.wp_idx < len(self.wps) - 1:
+                self.wp_idx += 1
+                tx, ty = self.wps[self.wp_idx]
+                dx, dy = tx - px, ty - py
+                t_ang = (math.degrees(math.atan2(dy, dx))) % 360.0
+                ang_diff = (t_ang - pang + 180.0) % 360.0 - 180.0
             action[0] = 1
             action[8] = 1
+
+        if ang_diff > 10.0:
+            action[4] = 1  # TURN_LEFT
+        elif ang_diff < -10.0:
+            action[5] = 1  # TURN_RIGHT
+
+        # Sharp turn braking to prevent overshoot
+        if abs(ang_diff) > 75.0:
+            action[0] = 0
 
         # Determine dominant specialist engine for supervised router label
         if enemy_active:
             exp_id = EXPERT_ENEMY
-        elif door_active:
+        elif door_active or (has_door and self.wp_idx <= self.door_idx + 1):
             exp_id = EXPERT_DOOR
         elif prog_active:
             exp_id = EXPERT_PROG
@@ -328,7 +360,9 @@ def collect_and_pretrain(
 
     model = DoomActorCritic(num_actions=9).to(device)
     optimizer = Adam(model.parameters(), lr=lr, eps=1e-5)
-    bce_none = nn.BCEWithLogitsLoss(reduction="none")
+    # Balanced action loss weights to ensure sparse discrete actions (USE=7, ATK=6) are actively predicted
+    pos_weight = torch.tensor([1.0, 2.0, 2.0, 2.0, 1.0, 1.0, 3.0, 25.0, 1.0], device=device)
+    bce_none = nn.BCEWithLogitsLoss(pos_weight=pos_weight, reduction="none")
     ce_none = nn.CrossEntropyLoss(reduction="none")
 
     # Domain Action Ownership Masks (MultiBinary 9):
