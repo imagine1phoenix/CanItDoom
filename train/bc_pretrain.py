@@ -149,13 +149,14 @@ class ExpertSpeedrunTeacher:
                 d_x = lines[:, [0, 2]].mean()
                 d_y = lines[:, [1, 3]].mean()
                 door_dist = math.hypot(d_x - px, d_y - py)
-                if door_dist < 130.0:
+                if door_dist < 90.0:
                     door_active = True
                 if door_dist < 110.0 and self.use_cooldown == 0:
                     action[7] = 1  # USE
                     self.use_cooldown = 14
 
         if self.use_cooldown > 0:
+            door_active = True
             self.use_cooldown -= 1
 
         # Key/item ray or keycard waypoint tracking
@@ -163,7 +164,7 @@ class ExpertSpeedrunTeacher:
         ray_dist = obs["rays"]["distance"]
         if (self.door_idx > 0 and self.wp_idx < self.door_idx) or np.any((ray_ht == 5) & (ray_dist < 0.35)):
             prog_active = True
-        if np.any(((ray_ht == 2) | (ray_ht == 3)) & (ray_dist < 0.16)):
+        if np.any(((ray_ht == 2) | (ray_ht == 3)) & (ray_dist < 0.09)):
             door_active = True
 
         # Advance along waypoints
@@ -379,11 +380,12 @@ def collect_and_pretrain(
                 spec_bce = bce_none(active_expert_logits, b_actions).mean(dim=-1)
                 spec_loss = (spec_bce * b_valid).sum() / valid_denom
 
-                # 3. Neural router situation supervision
+                # 3. Neural router situation supervision + entropy floor to keep gates soft for PPO
                 gate_ce = ce_none(aux["gate_logits"].view(-1, 4), b_exp_ids.view(-1)).view(batch_size, seq_len)
                 gate_loss = (gate_ce * b_valid).sum() / valid_denom
+                gate_ent = (aux["gate_entropy"] * b_valid).sum() / valid_denom
 
-                loss = blend_loss + 0.5 * spec_loss + 0.3 * gate_loss
+                loss = blend_loss + 0.5 * spec_loss + 0.2 * gate_loss - 0.05 * gate_ent
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
