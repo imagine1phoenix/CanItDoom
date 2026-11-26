@@ -12,9 +12,55 @@ V0 Architecture:
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 from torch.distributions import Bernoulli
+
+
+class LandmarkOdometryEncoder(nn.Module):
+    """V1 ego-centric landmark and odometry feature extractor.
+
+    Uses fixed ray geometry (cos/sin only, no atan2) to extract nearest
+    locked door, standard door, and enemy bearing/distance plus ego speed
+    and keycard state so the GRU trunk can retain spatial landmarks.
+    """
+
+    def __init__(self, num_rays: int = 64, out_dim: int = 32):
+        super().__init__()
+        angles = torch.arange(num_rays, dtype=torch.float32) * (2.0 * math.pi / num_rays)
+        self.register_buffer("ray_cos", torch.cos(angles))
+        self.register_buffer("ray_sin", torch.sin(angles))
+
+        # 3 landmark types * 4 features (seen, dist, cos, sin) + 2 odometry/key = 14
+        self.net = nn.Sequential(
+            nn.Linear(14, out_dim),
+            nn.ReLU(),
+        )
+
+    def _nearest_hit(self, dist: torch.Tensor, hit_type: torch.Tensor, target_type: int) -> torch.Tensor:
+        mask = (hit_type == target_type)
+        has_hit = mask.any(dim=-1, keepdim=True).float()
+        masked_dist = torch.where(mask, dist, torch.full_like(dist, 2.0))
+        min_dist, idx = masked_dist.min(dim=-1, keepdim=True)
+        min_dist = torch.where(has_hit > 0, min_dist, torch.ones_like(min_dist))
+        cos_a = self.ray_cos[idx]
+        sin_a = self.ray_sin[idx]
+        cos_a = torch.where(has_hit > 0, cos_a, torch.zeros_like(cos_a))
+        sin_a = torch.where(has_hit > 0, sin_a, torch.zeros_like(sin_a))
+        return torch.cat([has_hit, min_dist, cos_a, sin_a], dim=-1)
+
+    def forward(self, distance: torch.Tensor, hit_type: torch.Tensor, vitals: torch.Tensor) -> torch.Tensor:
+        locked_door = self._nearest_hit(distance, hit_type, 3)
+        std_door = self._nearest_hit(distance, hit_type, 2)
+        enemy_ray = self._nearest_hit(distance, hit_type, 4)
+
+        has_key = vitals[..., 8:14].max(dim=-1, keepdim=True)[0]
+        speed = torch.sqrt(vitals[..., 14:15] ** 2 + vitals[..., 15:16] ** 2 + 1e-6) / 10.0
+
+        feats = torch.cat([locked_door, std_door, enemy_ray, has_key, speed], dim=-1)
+        return self.net(feats)
 
 
 class RayEncoder(nn.Module):
@@ -139,10 +185,11 @@ class DoomActorCritic(nn.Module):
         self.ray_encoder = RayEncoder(out_dim=128)
         self.entity_encoder = EntityEncoder(out_dim=64)
         self.vitals_encoder = VitalsEncoder(out_dim=64)
+        self.landmark_encoder = LandmarkOdometryEncoder(num_rays=64, out_dim=32)
 
-        # Total fused feature dim: 128 + 64 + 64 = 256
+        # Total fused feature dim: 128 + 64 + 64 + 32 = 288
         self.fusion = nn.Sequential(
-            nn.Linear(256, hidden_dim),
+            nn.Linear(288, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
         )
@@ -183,8 +230,13 @@ class DoomActorCritic(nn.Module):
             obs["visible_entities"]["mask"],
         )
         vit_feat = self.vitals_encoder(obs["vitals"])
-        
-        fused = torch.cat([ray_feat, ent_feat, vit_feat], dim=-1)
+        lm_feat = self.landmark_encoder(
+            obs["rays"]["distance"],
+            obs["rays"]["hit_type"],
+            obs["vitals"],
+        )
+
+        fused = torch.cat([ray_feat, ent_feat, vit_feat, lm_feat], dim=-1)
         return self.fusion(fused)
 
     def initial_state(self, batch_size: int = 1, device: torch.device | str = "cpu") -> torch.Tensor:

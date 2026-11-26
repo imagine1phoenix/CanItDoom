@@ -209,7 +209,7 @@ def generate_curriculum_map(stage: int = 1, seed: int = 42) -> MapBuilder:
     sec1 = mb.add_sector(floor_h=0, ceil_h=128, floor_tex="FLOOR0_1")
 
     # Room 2: Goal/Corridor Room
-    corridor_w = 128.0
+    corridor_w = 96.0 if stage == 3 else 128.0
     r2_x1 = r1_x2 + corridor_w
     r2_y1 = r1_y1 + (r1_h - 384.0) / 2.0
     r2_w, r2_h = rng.randint(384, 512), 384.0

@@ -34,6 +34,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from doom_env import make_env
 from submission.model import DoomActorCritic
 from train.ppo import RewardShaper, collate_obs
+from train.vec_env import SubprocVecEnv
 
 
 def resolve_wad_path(wad_path: str) -> str:
@@ -160,6 +161,13 @@ class MultiMapEnvRunner:
         self.env.close()
 
 
+def _atomic_torch_save(obj: dict, target_path: Path) -> None:
+    """Atomically writes a PyTorch checkpoint using a temp file and os.replace."""
+    tmp_path = target_path.with_suffix(".pt.tmp")
+    torch.save(obj, tmp_path)
+    os.replace(tmp_path, target_path)
+
+
 def save_checkpoint(
     checkpoint_dir: Path,
     submission_weights_dir: Path,
@@ -168,47 +176,57 @@ def save_checkpoint(
     optimizer: Adam,
     global_step: int,
     stage: int,
+    stage_steps: int,
     mean_return: float,
     best_return: float,
     is_best: bool = False,
+    keep_milestones: int = 3,
 ) -> None:
-    """Saves checkpoint and mirrors to Google Drive and submission directory."""
+    """Saves atomic checkpoint, prunes old snapshots, and mirrors best weights."""
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     submission_weights_dir.mkdir(parents=True, exist_ok=True)
 
     state = {
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
-        "global_step": global_step,
-        "stage": stage,
-        "mean_return": mean_return,
-        "best_return": best_return,
-        "timestamp": time.time(),
+        "global_step": int(global_step),
+        "stage": int(stage),
+        "stage_steps": int(stage_steps),
+        "mean_return": float(mean_return),
+        "best_return": float(best_return),
+        "timestamp": float(time.time()),
     }
 
-    # 1. Save latest checkpoint
+    # 1. Save latest checkpoint atomically
     latest_file = checkpoint_dir / "ckpt_latest.pt"
-    torch.save(state, latest_file)
+    _atomic_torch_save(state, latest_file)
 
-    # 2. Save milestone checkpoint
+    # 2. Save milestone checkpoint atomically & prune old ones
     step_file = checkpoint_dir / f"ckpt_stage{stage}_step{global_step:07d}.pt"
-    torch.save(state, step_file)
+    _atomic_torch_save(state, step_file)
+    milestones = sorted(checkpoint_dir.glob("ckpt_stage*_step*.pt"), key=lambda p: p.stat().st_mtime)
+    while len(milestones) > keep_milestones:
+        old = milestones.pop(0)
+        try:
+            old.unlink()
+        except OSError:
+            pass
 
-    # 3. If best return, copy weights to submission/weights/model.pt
+    # 3. If best return, atomically update submission/weights/model.pt and ckpt_best.pt
     if is_best:
         submission_file = submission_weights_dir / "model.pt"
-        torch.save(model.state_dict(), submission_file)
+        _atomic_torch_save(model.state_dict(), submission_file)
+        _atomic_torch_save(state, checkpoint_dir / "ckpt_best.pt")
         print(f"★ New best return ({mean_return:+.2f})! Updated {submission_file}")
 
-    # 4. Mirror to Google Drive backup if available
+    # 4. Mirror to external backup directory if explicitly provided
     if drive_backup_dir is not None and drive_backup_dir.is_dir():
         try:
-            drive_latest = drive_backup_dir / "ckpt_latest.pt"
-            shutil.copy2(latest_file, drive_latest)
+            shutil.copy2(latest_file, drive_backup_dir / "ckpt_latest.pt")
             if is_best:
                 shutil.copy2(latest_file, drive_backup_dir / "ckpt_best.pt")
         except Exception as e:
-            print(f"Warning: Failed to backup to Drive: {e}")
+            print(f"Warning: Failed to backup checkpoint: {e}")
 
 
 def load_checkpoint(
@@ -223,7 +241,10 @@ def load_checkpoint(
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_file}")
 
     print(f"Resuming training from checkpoint: {ckpt_file}")
-    state = torch.load(ckpt_file, map_location=device, weights_only=True)
+    try:
+        state = torch.load(ckpt_file, map_location=device, weights_only=True)
+    except Exception:
+        state = torch.load(ckpt_file, map_location=device, weights_only=False)
 
     if isinstance(state, dict) and "model_state_dict" in state:
         model.load_state_dict(state["model_state_dict"])
@@ -254,6 +275,7 @@ def run_training(
     save_interval_sec: int = 900,  # 15 minutes
     drive_backup_dir: str | None = None,
     resume_path: str | None = None,
+    sync_envs: bool = False,
 ) -> None:
     """Main training orchestrator executing curriculum PPO with checkpointing."""
     if device_name == "auto":
@@ -275,8 +297,10 @@ def run_training(
     optimizer = Adam(model.parameters(), lr=lr, eps=1e-5)
 
     global_step = 0
+    session_steps = 0
     best_return = -999.0
     start_stage = stages[0]
+    resumed_stage_steps = 0
 
     if resume_path:
         if resume_path == "latest":
@@ -290,8 +314,12 @@ def run_training(
             ckpt_state = load_checkpoint(resume_path, model, optimizer, device)
             global_step = ckpt_state.get("global_step", 0)
             start_stage = ckpt_state.get("stage", stages[0])
+            resumed_stage_steps = ckpt_state.get("stage_steps", 0)
             best_return = ckpt_state.get("best_return", -999.0)
-            print(f"Resumed at step {global_step}, stage {start_stage}, best_return {best_return:+.2f}")
+            print(
+                f"Resumed at step {global_step}, stage {start_stage} "
+                f"(stage_steps {resumed_stage_steps}), best_return {best_return:+.2f}"
+            )
 
     last_save_time = time.time()
     recent_returns = deque(maxlen=30)
@@ -299,10 +327,17 @@ def run_training(
     recent_exits = deque(maxlen=30)
     recent_kills = deque(maxlen=30)
 
-    # Initialize environment runners
+    # Initialize environment runners (parallel multiprocessing by default for num_envs > 1)
     active_pool = catalog.get(start_stage, [("maps/two_rooms.wad", "MAP01")])
-    runners = [MultiMapEnvRunner(active_pool) for _ in range(num_envs)]
-    obs_batch = [r.reset(seed=i) for i, r in enumerate(runners)]
+    use_subproc = (not sync_envs) and (num_envs > 1)
+    if use_subproc:
+        vec_env = SubprocVecEnv(active_pool, num_envs=num_envs)
+        obs_batch = vec_env.reset(base_seed=0)
+        runners = None
+    else:
+        vec_env = None
+        runners = [MultiMapEnvRunner(active_pool) for _ in range(num_envs)]
+        obs_batch = [r.reset(seed=i) for i, r in enumerate(runners)]
 
     hx = model.initial_state(batch_size=num_envs, device=device)
 
@@ -318,15 +353,20 @@ def run_training(
                 continue
 
             stage_pool = catalog.get(stage, active_pool)
-            for r in runners:
-                r.update_pool(stage_pool)
+            if vec_env is not None:
+                vec_env.update_pool(stage_pool)
+            else:
+                for r in runners:
+                    r.update_pool(stage_pool)
 
-            print(f"\n>>> ENTERING CURRICULUM STAGE {stage} ({len(stage_pool)} maps) <<<")
+            stage_steps = resumed_stage_steps if stage == start_stage else 0
+            resumed_stage_steps = 0
+            print(f"\n>>> ENTERING CURRICULUM STAGE {stage} ({len(stage_pool)} maps, {stage_steps}/{steps_per_stage} steps) <<<")
 
-            stage_target_step = global_step + steps_per_stage
             iteration = 0
+            mean_ret = np.mean(recent_returns) if recent_returns else 0.0
 
-            while global_step < stage_target_step:
+            while stage_steps < steps_per_stage:
                 iteration += 1
                 mb_obs, mb_actions, mb_log_probs = [], [], []
                 mb_rewards, mb_dones, mb_values = [], [], []
@@ -336,26 +376,37 @@ def run_training(
                 model.eval()
                 for _ in range(rollout_len):
                     global_step += num_envs
+                    session_steps += num_envs
+                    stage_steps += num_envs
                     tensor_obs = collate_obs(obs_batch, device)
 
                     with torch.no_grad():
                         action, log_prob, _, val, hx = model.step(tensor_obs, hx, deterministic=False)
 
                     actions_np = action.cpu().numpy().astype(np.int8)
-                    next_obs, rewards, dones = [], [], []
+                    if vec_env is not None:
+                        next_obs, rewards, dones, infos = vec_env.step(actions_np)
+                        for i, (done, info) in enumerate(zip(dones, infos)):
+                            if done:
+                                hx[:, i, :] = 0.0
+                                recent_returns.append(info["ep_return"])
+                                recent_lens.append(info["ep_len"])
+                                recent_exits.append(1.0 if info.get("exit_reached") else 0.0)
+                                recent_kills.append(info.get("kills", 0))
+                    else:
+                        next_obs, rewards, dones = [], [], []
+                        for i, r in enumerate(runners):
+                            o, rew, done, _, info = r.step(actions_np[i])
+                            next_obs.append(o)
+                            rewards.append(rew)
+                            dones.append(done)
 
-                    for i, r in enumerate(runners):
-                        o, rew, done, _, info = r.step(actions_np[i])
-                        next_obs.append(o)
-                        rewards.append(rew)
-                        dones.append(done)
-
-                        if done:
-                            hx[:, i, :] = 0.0
-                            recent_returns.append(info["ep_return"])
-                            recent_lens.append(info["ep_len"])
-                            recent_exits.append(1.0 if info.get("exit_reached") else 0.0)
-                            recent_kills.append(info.get("kills", 0))
+                            if done:
+                                hx[:, i, :] = 0.0
+                                recent_returns.append(info["ep_return"])
+                                recent_lens.append(info["ep_len"])
+                                recent_exits.append(1.0 if info.get("exit_reached") else 0.0)
+                                recent_kills.append(info.get("kills", 0))
 
                     mb_obs.append(tensor_obs)
                     mb_actions.append(action)
@@ -426,7 +477,7 @@ def run_training(
 
                 # Progress reporting
                 elapsed_total = time.time() - run_start_time
-                sps = int(global_step / max(0.1, elapsed_total))
+                sps = int(session_steps / max(0.1, elapsed_total))
                 mean_ret = np.mean(recent_returns) if recent_returns else 0.0
                 exit_pct = (np.mean(recent_exits) * 100.0) if recent_exits else 0.0
                 mean_kills = np.mean(recent_kills) if recent_kills else 0.0
@@ -454,6 +505,7 @@ def run_training(
                         optimizer=optimizer,
                         global_step=global_step,
                         stage=stage,
+                        stage_steps=stage_steps,
                         mean_return=mean_ret,
                         best_return=best_return,
                         is_best=is_best,
@@ -469,14 +521,18 @@ def run_training(
                 optimizer=optimizer,
                 global_step=global_step,
                 stage=stage,
+                stage_steps=stage_steps,
                 mean_return=mean_ret,
                 best_return=best_return,
                 is_best=True,
             )
 
     finally:
-        for r in runners:
-            r.close()
+        if vec_env is not None:
+            vec_env.close()
+        if runners is not None:
+            for r in runners:
+                r.close()
 
     print(f"\nTraining run completed. Best return: {best_return:+.2f}. Weights saved in {sub_weights / 'model.pt'}.")
 
@@ -491,6 +547,7 @@ def main():
     parser.add_argument("--save-interval-sec", type=int, default=900, help="Checkpoint interval in seconds (default: 900 = 15m)")
     parser.add_argument("--drive-backup", default=None, help="Google Drive backup directory")
     parser.add_argument("--resume", default=None, help="Checkpoint path or 'latest' to resume")
+    parser.add_argument("--sync", action="store_true", help="Disable multiprocessing and step envs sequentially")
     args = parser.parse_args()
 
     stage_list = [int(s.strip()) for s in args.stages.split(",") if s.strip()]
@@ -504,6 +561,7 @@ def main():
         save_interval_sec=args.save_interval_sec,
         drive_backup_dir=args.drive_backup,
         resume_path=args.resume,
+        sync_envs=args.sync,
     )
 
 

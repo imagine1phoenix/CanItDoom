@@ -229,4 +229,8 @@ _vizdoom.ini
 # Tool and agent configurations
 .kilo/
 
+# Training checkpoints (large transient files)
+checkpoints/
+
+
 

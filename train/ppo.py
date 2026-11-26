@@ -40,14 +40,32 @@ class RewardShaper:
         self.last_damage = 0.0
         self.last_keys: set = set()
         self.last_items = 0
+        self.initially_closed: np.ndarray | None = None
+        self.opened_doors: np.ndarray | None = None
 
     def reset(self, priv: dict) -> None:
         self.visited_cells = set()
         self.last_kills = priv.get("kills", 0)
         self.last_damage = priv.get("damage_taken", 0.0)
-        keys = priv.get("keys", set())
-        self.last_keys = set(keys) if isinstance(keys, (set, list)) else set()
+        keys = priv.get("keys", 0)
+        if isinstance(keys, np.ndarray):
+            self.last_keys = set(np.where(keys > 0)[0])
+        elif isinstance(keys, (set, list)):
+            self.last_keys = set(keys)
+        else:
+            self.last_keys = set()
         self.last_items = priv.get("items", 0)
+
+        door_lock = priv.get("door_lock")
+        ceil = priv.get("sector_ceiling")
+        floor = priv.get("sector_floor")
+        if door_lock is not None and ceil is not None and floor is not None:
+            door_mask = door_lock >= 0
+            self.initially_closed = door_mask & ((ceil - floor) < 56.0)
+            self.opened_doors = np.zeros_like(door_mask, dtype=bool)
+        else:
+            self.initially_closed = None
+            self.opened_doors = None
         
         # Mark initial position
         x, y = priv.get("x", 0.0), priv.get("y", 0.0)
@@ -96,6 +114,19 @@ class RewardShaper:
             shaped += 3.0 * new_keys
             events["key"] = new_keys
             self.last_keys = current_keys
+
+        # 5b. Door opening (+0.5 per newly opened door)
+        if self.initially_closed is not None and self.opened_doors is not None:
+            ceil = priv.get("sector_ceiling")
+            floor = priv.get("sector_floor")
+            if ceil is not None and floor is not None:
+                now_open = self.initially_closed & ((ceil - floor) >= 56.0)
+                newly_opened = now_open & (~self.opened_doors)
+                num_new_doors = int(np.sum(newly_opened))
+                if num_new_doors > 0:
+                    shaped += 0.5 * num_new_doors
+                    events["door"] = num_new_doors
+                    self.opened_doors |= newly_opened
 
         # 6. Spatial Exploration bonus (count-based / cell visitation)
         x, y = priv.get("x", 0.0), priv.get("y", 0.0)
