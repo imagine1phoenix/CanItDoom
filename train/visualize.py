@@ -159,14 +159,15 @@ class VisualizerHUD:
         self.font_bold = pygame.font.SysFont("Menlo, Consolas, Courier New, monospace", 12, bold=True)
         self.font_title = pygame.font.SysFont("Menlo, Consolas, Courier New, monospace", 13, bold=True)
 
-        if not headless and os.environ.get("DISPLAY") or sys.platform == "darwin":
+        if not headless and (os.environ.get("DISPLAY") or sys.platform in ("darwin", "win32")):
             try:
                 self.screen = pygame.display.set_mode((CANVAS_W, CANVAS_H))
-                pygame.display.set_caption("teacher bot on generated levels (P pause, N next level, Esc quit)")
+                pygame.display.set_caption("CanItDoom Neural Cluster HUD (P pause, N next level, Esc quit)")
             except Exception:
                 self.headless = True
                 self.screen = pygame.Surface((CANVAS_W, CANVAS_H))
         else:
+            self.headless = True
             self.screen = pygame.Surface((CANVAS_W, CANVAS_H))
 
     def render_frame(
