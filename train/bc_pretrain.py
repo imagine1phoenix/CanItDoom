@@ -312,11 +312,16 @@ def collect_and_pretrain(
 
     catalog = load_curriculum_catalog()
     all_wads = []
-    for s in (1, 2, 3, 4):
-        all_wads.extend(catalog.get(s, []))
+    stages = [catalog.get(s, []) for s in (1, 2, 3, 4)]
+    max_len = max(len(st) for st in stages if len(st) > 0)
+    for i in range(max_len):
+        for st in stages:
+            if i < len(st):
+                all_wads.append(st[i])
+
     two_rooms = REPO_ROOT / "env" / "doom_env" / "maps" / "two_rooms.wad"
     if two_rooms.exists():
-        all_wads.append(str(two_rooms))
+        all_wads.append((str(two_rooms), "MAP01"))
 
     if not all_wads:
         all_wads = [str(two_rooms)]
@@ -384,7 +389,7 @@ def collect_and_pretrain(
 
             if reward > 5.0 or info.get("exit_reached", False):
                 exits_seen += 1
-            cur_kills = int(info.get("kills", 0))
+            cur_kills = int(env.privileged_state().get("kills", 0))
             if cur_kills > ep_kills:
                 kills_seen += (cur_kills - ep_kills)
                 ep_kills = cur_kills
