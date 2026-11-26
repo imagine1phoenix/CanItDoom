@@ -84,8 +84,13 @@ class RewardShaper:
             self.last_damage = damage
 
         # 5. Key pickups
-        keys = priv.get("keys", set())
-        current_keys = set(keys) if isinstance(keys, (set, list)) else set()
+        keys = priv.get("keys", 0)
+        if isinstance(keys, np.ndarray):
+            current_keys = set(np.where(keys > 0)[0])
+        elif isinstance(keys, (set, list)):
+            current_keys = set(keys)
+        else:
+            current_keys = set()
         new_keys = len(current_keys - self.last_keys)
         if new_keys > 0:
             shaped += 3.0 * new_keys
@@ -244,6 +249,7 @@ def train_ppo(
                 dones.append(done)
 
                 if done:
+                    hx[:, i, :] = 0.0
                     recent_returns.append(info["ep_return"])
                     recent_lens.append(info["ep_len"])
 
