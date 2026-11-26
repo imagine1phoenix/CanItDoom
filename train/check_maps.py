@@ -184,6 +184,29 @@ def main() -> int:
     parser.add_argument("--steps", type=int, default=100, help="Random action steps per map")
     parser.add_argument("--seed", type=int, default=0, help="Random seed")
     parser.add_argument("--render-buffers", action="store_true", help="Also render RGB/depth buffers")
+    parser.add_argument(
+        "--split",
+        choices=["all", "train", "held_out"],
+        default="all",
+        help="Filter verification to a specific dataset split (default: all)",
+    )
+    parser.add_argument(
+        "--stage",
+        type=int,
+        default=None,
+        help="Filter verification to a specific curriculum stage number (1-5)",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Limit verification to first N matching maps",
+    )
+    parser.add_argument(
+        "--quick",
+        action="store_true",
+        help="Quick smoke verification mode (caps steps to 10 and limit to 10 maps if unset)",
+    )
     args = parser.parse_args()
 
     if not args.catalog.is_file():
@@ -200,7 +223,7 @@ def main() -> int:
         print(f"ERROR: {args.catalog} must be a non-empty JSON list", file=sys.stderr)
         return 1
 
-    # Check for duplicate (file, map) pairs or held-out leakage.
+    # Check for duplicate (file, map) pairs or held-out leakage across full catalog.
     seen_splits: dict[tuple[str, str], set[str]] = {}
     duplicates: list[str] = []
     for entry in entries:
@@ -210,8 +233,19 @@ def main() -> int:
             duplicates.append(f"{key[0]}:{key[1]}")
         seen_splits.setdefault(key, set()).add(split)
 
+    steps = 10 if args.quick else args.steps
+    limit = (10 if args.limit is None else args.limit) if args.quick else args.limit
+
+    target_entries = entries
+    if args.split != "all":
+        target_entries = [e for e in target_entries if e.get("split") == args.split]
+    if args.stage is not None:
+        target_entries = [e for e in target_entries if e.get("stage") == args.stage]
+    if limit is not None:
+        target_entries = target_entries[:limit]
+
     t0 = time.perf_counter()
-    rows = [check_entry(entry, args.steps, args.seed, args.render_buffers) for entry in entries]
+    rows = [check_entry(entry, steps, args.seed, args.render_buffers) for entry in target_entries]
     elapsed = time.perf_counter() - t0
 
     print_table(rows)
