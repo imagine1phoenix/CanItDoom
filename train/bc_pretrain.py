@@ -270,18 +270,34 @@ def collect_and_pretrain(
             done_mask = 1.0 - b_dones
 
             # Collate batch sequences for model forward
-            # Flatten B*T for feature extraction
             flat_obs_list = []
             for i in indices:
                 flat_obs_list.extend(seq_obs_list[i])
             b_obs = collate_obs(flat_obs_list, device)
 
+            obs_seq = {
+                "rays": {
+                    "distance": b_obs["rays"]["distance"].view(batch_size, seq_len, 64),
+                    "hit_type": b_obs["rays"]["hit_type"].view(batch_size, seq_len, 64),
+                },
+                "visible_entities": {
+                    "features": b_obs["visible_entities"]["features"].view(batch_size, seq_len, 32, 5),
+                    "entity_type": b_obs["visible_entities"]["entity_type"].view(batch_size, seq_len, 32),
+                    "mask": b_obs["visible_entities"]["mask"].view(batch_size, seq_len, 32),
+                },
+                "vitals": b_obs["vitals"].view(batch_size, seq_len, 17),
+            }
+
             model.train()
             total_loss_val = 0.0
 
             for _ in range(bc_epochs):
-                feats = model.extract_features(b_obs)  # (B*T, hidden_dim)
-                feats = feats.view(batch_size, seq_len, -1)  # (B, T, hidden_dim)
+                mem_grids, mem_lms, mem_odom = model.spatial_memory.build_sequence_inputs(
+                    obs_seq, actions_seq=b_actions, done_mask_seq=done_mask
+                )
+                feats = model.extract_features(
+                    obs_seq, mem_grid=mem_grids, mem_landmarks=mem_lms, mem_odom=mem_odom
+                )  # (B, T, hidden_dim)
 
                 init_hx = model.initial_state(batch_size=batch_size, device=device)
                 outputs = []
