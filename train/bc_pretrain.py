@@ -75,6 +75,8 @@ class ExpertSpeedrunTeacher:
         self.door_idx = -1
         self.wps: list[tuple[float, float]] = []
         self.wp_idx = 0
+        self.last_enemy_dir = 0
+        self.enemy_pursuit_timer = 0
         self.plan_waypoints()
 
     def plan_waypoints(self) -> None:
@@ -113,6 +115,8 @@ class ExpertSpeedrunTeacher:
     def reset(self) -> None:
         self.use_cooldown = 0
         self.wp_idx = 0
+        self.last_enemy_dir = 0
+        self.enemy_pursuit_timer = 0
         self.plan_waypoints()
 
     def act_with_expert(self, obs: dict) -> tuple[np.ndarray, int]:
@@ -126,19 +130,63 @@ class ExpertSpeedrunTeacher:
         door_active = False
         prog_active = False
 
-        # Combat: attack any visible hostile enemy in FOV (melee=1, hitscan=2, projectile=3)
+        # 1. Combat & Enemy Tracking: Find nearest visible hostile enemy
+        closest_enemy_idx = -1
+        min_enemy_dist = 999.0
         for i in range(len(v_ents["mask"])):
             if v_ents["mask"][i] == 1:
                 etype = int(v_ents["entity_type"][i])
-                if etype in (1, 2, 3):
-                    enemy_active = True
-                    feat = v_ents["features"][i]
-                    sin_r, cos_r = feat[1], feat[2]
-                    if cos_r > 0.05 and abs(sin_r) < 0.35:
-                        action[6] = 1  # ATTACK
-                    break
-                if etype in (5, 6, 7, 8, 9) and v_ents["features"][i][0] < 0.45:
+                if etype in (1, 2, 3, 4):
+                    d = float(v_ents["features"][i][0])
+                    if d < min_enemy_dist:
+                        min_enemy_dist = d
+                        closest_enemy_idx = i
+                elif etype in (5, 6, 7, 8, 9) and v_ents["features"][i][0] < 0.45:
                     prog_active = True
+
+        if closest_enemy_idx >= 0:
+            enemy_active = True
+            feat = v_ents["features"][closest_enemy_idx]
+            dist_norm, sin_r, cos_r = feat[0], feat[1], feat[2]
+
+            # Aim: Turn actively to face the enemy
+            if sin_r > 0.05:
+                action[4] = 1  # TURN_LEFT
+                self.last_enemy_dir = 1
+            elif sin_r < -0.05:
+                action[5] = 1  # TURN_RIGHT
+                self.last_enemy_dir = -1
+
+            # Fire: When enemy is aligned in front cone
+            if cos_r > 0.0 and abs(sin_r) < 0.28:
+                action[6] = 1  # ATTACK
+
+            # Pursue / Combat Movement:
+            if dist_norm > 0.16 and cos_r > 0.0:
+                action[0] = 1  # MOVE_FORWARD
+                action[8] = 1  # SPEED
+            elif dist_norm < 0.08:
+                action[1] = 1  # Backpedal from close hostiles
+            else:
+                if abs(sin_r) < 0.20:
+                    action[2 if self.last_enemy_dir < 0 else 3] = 1  # Strafe
+
+            self.enemy_pursuit_timer = 20  # Keep pursuit active if line-of-sight breaks
+
+        elif self.enemy_pursuit_timer > 0 and self.last_enemy_dir != 0:
+            # Occlusion tracking: Enemy ducked behind a pillar/corner, round the corner to re-acquire!
+            self.enemy_pursuit_timer -= 1
+            enemy_active = True
+            action[0] = 1  # MOVE_FORWARD
+            action[8] = 1  # SPEED
+            if self.last_enemy_dir > 0:
+                action[4] = 1  # TURN_LEFT around corner
+            else:
+                action[5] = 1  # TURN_RIGHT around corner
+
+        # In combat mode: prioritize eliminating enemies before advancing to the exit pad!
+        if enemy_active:
+            return action, EXPERT_ENEMY
 
         ceil = priv.get("sector_ceiling")
         has_door = 2 in self.env.mapinfo.door_sectors
@@ -325,6 +373,7 @@ def collect_and_pretrain(
 
         done = False
         ep_steps = 0
+        ep_kills = 0
         while not done and ep_steps < 750:
             ep_steps += 1
             collected_steps += 1
@@ -335,8 +384,10 @@ def collect_and_pretrain(
 
             if reward > 5.0 or info.get("exit_reached", False):
                 exits_seen += 1
-            if info.get("kill_count", 0) > 0:
-                kills_seen += int(info["kill_count"])
+            cur_kills = int(info.get("kills", 0))
+            if cur_kills > ep_kills:
+                kills_seen += (cur_kills - ep_kills)
+                ep_kills = cur_kills
 
             ep_obs.append(obs)
             ep_act.append(action)

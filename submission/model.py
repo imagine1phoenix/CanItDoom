@@ -321,13 +321,13 @@ class DoomActorCritic(nn.Module):
 
         # Specialist neural cluster
         # Nav: 24 (clearances/wall) + 3 (vel) + 4 (visitation quadrants) + 9 (prev_action) = 40
-        # Enemy: 32 (enemy_ent) + 4 (enemy_ray) + 8 (combat vitals) + 9 (prev_action) = 53
+        # Enemy: 32 (enemy_ent) + 4 (enemy_ray) + 8 (combat vitals) + 8 (sector clearances) + 9 (prev_action) = 61
         # Door: 4 (std) + 4 (locked) + 9 (dist) + 9 (flag) + 6 (keys) + 1 (has_key) + 1 (speed) + 9 (prev_action) = 43
         # Progression: 32 (item_ent) + 4 (item_ray) + 4 (locked_ray) + 9 (vitals) + 6 (landmarks) + 9 (prev_action) = 64
         self.experts = nn.ModuleDict(
             {
                 "nav": SpecialistExpert(domain_dim=40, gru_dim=hidden_dim, num_actions=num_actions),
-                "enemy": SpecialistExpert(domain_dim=53, gru_dim=hidden_dim, num_actions=num_actions),
+                "enemy": SpecialistExpert(domain_dim=61, gru_dim=hidden_dim, num_actions=num_actions),
                 "door": SpecialistExpert(domain_dim=43, gru_dim=hidden_dim, num_actions=num_actions),
                 "progression": SpecialistExpert(domain_dim=64, gru_dim=hidden_dim, num_actions=num_actions),
             }
@@ -475,14 +475,14 @@ class DoomActorCritic(nn.Module):
             dim=-1,
         )
 
-        # 2. Enemy domain: hostile/projectile entities + nearest enemy ray + combat vitals + prev_action
+        # 2. Enemy domain: hostile/projectile entities + nearest enemy ray + combat vitals + 8-sector clearances + prev_action
         enemy_ent = self.enemy_entity_encoder(
             obs["visible_entities"]["features"],
             obs["visible_entities"]["entity_type"],
             obs["visible_entities"]["mask"],
         )
         enemy_ray = nearest_ray_features(dist, ht, 4, self.ray_cos, self.ray_sin)
-        enemy_in = torch.cat([enemy_ent, enemy_ray, norm_v[..., 0:8], prev_action], dim=-1)
+        enemy_in = torch.cat([enemy_ent, enemy_ray, norm_v[..., 0:8], dist_sec.min(dim=-1)[0], prev_action], dim=-1)
 
         # 3. Door domain: std/locked door rays + 9-ray front cone + keys + speed + prev_action
         std_door = nearest_ray_features(dist, ht, 2, self.ray_cos, self.ray_sin)
