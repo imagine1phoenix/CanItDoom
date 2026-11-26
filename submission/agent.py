@@ -31,11 +31,25 @@ class DoomAgent:
         # Attempt loading checkpoint if present
         checkpoint_path = WEIGHTS_DIR / "model.pt"
         if checkpoint_path.is_file():
-            state = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
-            if isinstance(state, dict) and "model_state_dict" in state:
-                self.model.load_state_dict(state["model_state_dict"])
-            elif isinstance(state, dict):
-                self.model.load_state_dict(state)
+            is_lfs_pointer = False
+            try:
+                with open(checkpoint_path, "rb") as f:
+                    header = f.read(100)
+                    if header.startswith(b"version https://git-lfs"):
+                        is_lfs_pointer = True
+            except OSError:
+                pass
+
+            if not is_lfs_pointer:
+                try:
+                    state = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
+                except Exception:
+                    state = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+
+                if isinstance(state, dict) and "model_state_dict" in state:
+                    self.model.load_state_dict(state["model_state_dict"])
+                elif isinstance(state, dict):
+                    self.model.load_state_dict(state)
 
         self.model.to(self.device)
         self.model.eval()

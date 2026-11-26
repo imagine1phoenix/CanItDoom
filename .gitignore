@@ -226,3 +226,7 @@ _vizdoom.ini
 # macOS system files
 .DS_Store
 
+# Tool and agent configurations
+.kilo/
+
+
