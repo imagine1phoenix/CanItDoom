@@ -165,7 +165,14 @@ def _atomic_torch_save(obj: dict, target_path: Path) -> None:
     """Atomically writes a PyTorch checkpoint using a temp file and os.replace."""
     tmp_path = target_path.with_suffix(".pt.tmp")
     torch.save(obj, tmp_path)
-    os.replace(tmp_path, target_path)
+    for attempt in range(5):
+        try:
+            os.replace(tmp_path, target_path)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.1 * (attempt + 1))
 
 
 def save_checkpoint(
@@ -187,6 +194,7 @@ def save_checkpoint(
     submission_weights_dir.mkdir(parents=True, exist_ok=True)
 
     state = {
+        "arch": "cluster",
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "global_step": int(global_step),
@@ -247,6 +255,9 @@ def load_checkpoint(
         state = torch.load(ckpt_file, map_location=device, weights_only=False)
 
     if isinstance(state, dict) and "model_state_dict" in state:
+        ckpt_arch = state.get("arch")
+        if ckpt_arch is not None and ckpt_arch != "cluster":
+            raise ValueError(f"Incompatible checkpoint arch={ckpt_arch!r}; expected 'cluster'.")
         model.load_state_dict(state["model_state_dict"])
         if optimizer is not None and "optimizer_state_dict" in state:
             optimizer.load_state_dict(state["optimizer_state_dict"])
@@ -270,6 +281,7 @@ def run_training(
     epochs: int = 4,
     ent_coef: float = 0.01,
     vf_coef: float = 0.5,
+    gate_ent_coef: float = 0.005,
     device_name: str = "auto",
     checkpoint_dir: str = "checkpoints",
     save_interval_sec: int = 900,  # 15 minutes
@@ -340,10 +352,11 @@ def run_training(
         obs_batch = [r.reset(seed=i) for i, r in enumerate(runners)]
 
     hx = model.initial_state(batch_size=num_envs, device=device)
+    prev_action = model.initial_prev_action(batch_size=num_envs, device=device)
 
-    print("\n" + "=" * 105)
-    print(f"{'Time':<8} | {'Stage':<5} | {'Step':<9} | {'SPS':<6} | {'Return':<7} | {'Exit%':<6} | {'Kills':<5} | {'PiLoss':<7} | {'VLoss':<7} | {'Ent':<6}")
-    print("-" * 105)
+    print("\n" + "=" * 128)
+    print(f"{'Time':<8} | {'Stage':<5} | {'Step':<9} | {'SPS':<6} | {'Return':<7} | {'Exit%':<6} | {'Kills':<5} | {'PiLoss':<7} | {'VLoss':<7} | {'Ent':<6} | {'Gates (N/E/D/P)'}")
+    print("-" * 128)
 
     run_start_time = time.time()
 
@@ -368,7 +381,7 @@ def run_training(
 
             while stage_steps < steps_per_stage:
                 iteration += 1
-                mb_obs, mb_actions, mb_log_probs = [], [], []
+                mb_obs, mb_actions, mb_prev_actions, mb_log_probs = [], [], [], []
                 mb_rewards, mb_dones, mb_values = [], [], []
                 init_hx = hx.clone()
 
@@ -379,16 +392,21 @@ def run_training(
                     session_steps += num_envs
                     stage_steps += num_envs
                     tensor_obs = collate_obs(obs_batch, device)
+                    mb_prev_actions.append(prev_action.clone())
 
                     with torch.no_grad():
-                        action, log_prob, _, val, hx = model.step(tensor_obs, hx, deterministic=False)
+                        action, log_prob, _, val, hx = model.step(
+                            tensor_obs, hx, prev_action=prev_action, deterministic=False
+                        )
 
                     actions_np = action.cpu().numpy().astype(np.int8)
+                    next_prev_action = action.clone()
                     if vec_env is not None:
                         next_obs, rewards, dones, infos = vec_env.step(actions_np)
                         for i, (done, info) in enumerate(zip(dones, infos)):
                             if done:
                                 hx[:, i, :] = 0.0
+                                next_prev_action[i] = 0.0
                                 recent_returns.append(info["ep_return"])
                                 recent_lens.append(info["ep_len"])
                                 recent_exits.append(1.0 if info.get("exit_reached") else 0.0)
@@ -403,6 +421,7 @@ def run_training(
 
                             if done:
                                 hx[:, i, :] = 0.0
+                                next_prev_action[i] = 0.0
                                 recent_returns.append(info["ep_return"])
                                 recent_lens.append(info["ep_len"])
                                 recent_exits.append(1.0 if info.get("exit_reached") else 0.0)
@@ -414,12 +433,13 @@ def run_training(
                     mb_rewards.append(torch.tensor(rewards, device=device, dtype=torch.float32))
                     mb_dones.append(torch.tensor(dones, device=device, dtype=torch.float32))
                     mb_values.append(val)
+                    prev_action = next_prev_action
                     obs_batch = next_obs
 
                 # GAE computation
                 final_obs = collate_obs(obs_batch, device)
                 with torch.no_grad():
-                    _, _, _, next_val, _ = model.step(final_obs, hx)
+                    _, _, _, next_val, _ = model.step(final_obs, hx, prev_action=prev_action)
 
                 advantages = torch.zeros(rollout_len, num_envs, device=device)
                 last_gae = 0.0
@@ -434,6 +454,7 @@ def run_training(
 
                 # Batch sequence preparation
                 b_actions = torch.stack(mb_actions, dim=1)
+                b_prev_actions = torch.stack(mb_prev_actions, dim=1)
                 b_returns = returns.transpose(0, 1)
                 b_advantages = advantages.transpose(0, 1)
                 b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
@@ -455,10 +476,17 @@ def run_training(
 
                 # Optimization epochs
                 model.train()
+                last_gates = None
                 for _ in range(epochs):
-                    new_log_probs, entropy, new_values = model.evaluate_sequence(
-                        b_obs_seq, init_hx, b_actions, done_mask_seq=(1.0 - b_dones_seq)
+                    new_log_probs, entropy, new_values, aux = model.evaluate_sequence(
+                        b_obs_seq,
+                        init_hx,
+                        b_actions,
+                        done_mask_seq=(1.0 - b_dones_seq),
+                        prev_actions_seq=b_prev_actions,
+                        return_aux=True,
                     )
+                    last_gates = aux["gate_probs"].detach().mean(dim=(0, 1))
 
                     ratio = torch.exp(new_log_probs - b_old_log_probs)
                     surr1 = ratio * b_advantages
@@ -467,8 +495,14 @@ def run_training(
 
                     value_loss = 0.5 * ((new_values - b_returns) ** 2).mean()
                     ent_loss = -entropy.mean()
+                    gate_ent_loss = -aux["gate_entropy"].mean()
 
-                    total_loss = policy_loss + vf_coef * value_loss + ent_coef * ent_loss
+                    total_loss = (
+                        policy_loss
+                        + vf_coef * value_loss
+                        + ent_coef * ent_loss
+                        + gate_ent_coef * gate_ent_loss
+                    )
 
                     optimizer.zero_grad()
                     total_loss.backward()
@@ -481,13 +515,18 @@ def run_training(
                 mean_ret = np.mean(recent_returns) if recent_returns else 0.0
                 exit_pct = (np.mean(recent_exits) * 100.0) if recent_exits else 0.0
                 mean_kills = np.mean(recent_kills) if recent_kills else 0.0
+                gate_str = (
+                    f"{last_gates[0]:.2f}/{last_gates[1]:.2f}/{last_gates[2]:.2f}/{last_gates[3]:.2f}"
+                    if last_gates is not None
+                    else "-/-/-/-"
+                )
 
                 if iteration % 5 == 0:
                     time_str = time.strftime("%H:%M:%S", time.gmtime(elapsed_total))
                     print(
                         f"{time_str:<8} | S{stage:<4} | {global_step:<9d} | {sps:<6d} | "
                         f"{mean_ret:<+7.2f} | {exit_pct:<5.1f}% | {mean_kills:<5.1f} | "
-                        f"{policy_loss.item():<7.4f} | {value_loss.item():<7.4f} | {entropy.mean().item():<6.3f}"
+                        f"{policy_loss.item():<7.4f} | {value_loss.item():<7.4f} | {entropy.mean().item():<6.3f} | {gate_str}"
                     )
 
                 # Checkpoint rotation (every save_interval_sec)
@@ -548,6 +587,7 @@ def main():
     parser.add_argument("--drive-backup", default=None, help="Google Drive backup directory")
     parser.add_argument("--resume", default=None, help="Checkpoint path or 'latest' to resume")
     parser.add_argument("--sync", action="store_true", help="Disable multiprocessing and step envs sequentially")
+    parser.add_argument("--gate-ent-coef", type=float, default=0.005, help="Router entropy regularization coefficient")
     args = parser.parse_args()
 
     stage_list = [int(s.strip()) for s in args.stages.split(",") if s.strip()]
@@ -556,6 +596,7 @@ def main():
         stages=stage_list,
         steps_per_stage=args.steps_per_stage,
         num_envs=args.envs,
+        gate_ent_coef=args.gate_ent_coef,
         device_name=args.device,
         checkpoint_dir=args.checkpoints,
         save_interval_sec=args.save_interval_sec,
