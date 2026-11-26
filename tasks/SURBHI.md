@@ -32,15 +32,11 @@ Surbhi ensures the agent learns generalizable behaviors across progressively cha
 
 ## 2. Granular Task Checklist
 
-- [ ] **Task S.1 — Baseline Map Verification:** Run `maps/two_rooms.wad` through `doom_env` and confirm zero errors.
-  - *Done when:* Episode runs locally without crashes.
-- [ ] **Task S.2 — Held-Out Selection & Catalog:** Select 6 Freedoom 2 maps, update `train/MAP_SOURCES.md`, and generate `train/maps.json`.
-  - *Done when:* `train/maps.json` is committed by 16:00 Thu.
-- [ ] **Task S.3 — Map Integrity Test Script (`train/check_maps.py`):** Build script testing all maps for compatibility and sector bounds.
-  - *Done when:* Script prints tabular pass/fail summary across all registered maps.
-- [ ] **Task S.4 — Batch Map Generation:** Run procedural generator to create 50+ WADs per stage for Stages 1–4.
-  - *Done when:* All generated maps pass `train/check_maps.py` by 21:30 Thu.
-- [ ] **Task S.5 — Failure Audit 1:** Review checkpoint replays at 21:00 Thu and deliver issue list to Prit.
+- [x] **Task S.1 — Baseline Map Verification:** Run `maps/two_rooms.wad` through `doom_env` and confirm zero errors. *(Done)*
+- [x] **Task S.2 — Held-Out Selection & Catalog:** Select 6 Freedoom 2 maps, update `train/MAP_SOURCES.md`, and generate `train/maps.json`. *(Done)*
+- [x] **Task S.3 — Map Integrity Test Script (`train/check_maps.py`):** Build script testing all maps for compatibility and sector bounds. *(Done)*
+- [x] **Task S.4 — Batch Map Generation:** Run procedural generator to create 50+ WADs per stage for Stages 1–4. *(Done)*
+- [x] **Task S.5 — Failure Audit 1:** Review checkpoint replays at 21:00 Thu and deliver issue list to Prit. *(Done in `train/FAILURE_AUDIT_1.md`)*
 - [ ] **Task S.6 — Failure Audit 2:** Review overnight training replays at 05:30 Fri and report progression rates.
 
 ---
