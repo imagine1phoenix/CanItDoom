@@ -44,6 +44,7 @@ if str(ENV_DIR) not in sys.path:
 
 from doom_env import make_env
 import doom_env.spaces as S
+from train.bc_pretrain import ExpertSpeedrunTeacher
 
 # UI Layout Dimensions
 CANVAS_W = 1260
@@ -111,8 +112,7 @@ class TeacherBot:
             for i in range(len(ents["mask"])):
                 if ents["mask"][i] == 1 and ents["entity_type"][i] == 1:  # Enemy
                     feat = ents["features"][i]
-                    rel_angle = math.atan2(feat[1], feat[2]) if hasattr(math, "atan2") else 0.0
-                    if abs(rel_angle) < 0.35 and feat[0] < 0.6:
+                    if abs(float(feat[1])) < 0.35 and float(feat[2]) > 0.0 and float(feat[0]) < 0.6:
                         has_enemy_front = True
                         break
 
@@ -208,86 +208,168 @@ class VisualizerHUD:
         hp = priv.get("health", 0.0)
         ammo = obs["vitals"][3]
         armor = obs["vitals"][1]
-        speed = math.sqrt(obs["vitals"][14] ** 2 + obs["vitals"][15] ** 2)
+        speed = obs["vitals"][14]
         n_ents = int(np.sum(obs["visible_entities"]["mask"]))
+        keys_held = priv.get("keys", np.zeros(6))
+        key_labels = ["Bc", "Yc", "Rc", "Bs", "Ys", "Rs"]
+        active_keys = [lbl for lbl, flag in zip(key_labels, keys_held) if flag > 0]
+        keys_str = ",".join(active_keys) if active_keys else "-"
 
         hud_y = r1.y + 292
-        line1 = f"step {step:<4d} health {hp:<3.0f} armor {armor:<3.0f} ammo {ammo:<3.0f} ents {n_ents:<2d} speed {speed:<+4.1f} ret {episode_return:<+5.2f}"
+        line1 = f"step {step:<4d} hp {hp:<3.0f} arm {armor:<3.0f} ammo {ammo:<3.0f} spd {speed:<+4.1f} ret {episode_return:<+5.2f}"
         t1 = self.font_small.render(line1, True, COLOR_TEXT_MAIN)
         canvas.blit(t1, (r1.x + 8, hud_y))
 
         # Pressed buttons
         pressed_btns = [name for name, val in zip(BUTTON_NAMES, action) if int(val) == 1]
         btn_str = " ".join(pressed_btns) if pressed_btns else "NONE"
-        line2 = f"mode: {mode.upper():<7s} | map: {map_label:<12s} | act: {btn_str}"
-        t2 = self.font_bold.render(line2, True, COLOR_GREEN if mode == "model" else COLOR_TEXT_HIGHLIGHT)
+        line2 = f"{mode.upper()} | {map_label} | act: {btn_str}"
+        t2 = self.font_bold.render(line2[:54], True, COLOR_GREEN if mode == "model" else COLOR_TEXT_HIGHLIGHT)
         canvas.blit(t2, (r1.x + 8, hud_y + 18))
 
-        line3 = f"{mode} bot | generated level | last: {last_result}"
-        t3 = self.font_small.render(line3, True, COLOR_TEXT_DIM)
+        line3 = f"keys {keys_str} | ents {n_ents} | last: {last_result}"
+        t3 = self.font_small.render(line3[:56], True, COLOR_TEXT_DIM)
         canvas.blit(t3, (r1.x + 8, hud_y + 36))
 
+        line4 = "[P]ause  [N]ext  [M]ode(model/teacher/manual)  [Esc]uit"
+        t4 = self.font_small.render(line4, True, COLOR_TEXT_DIM)
+        canvas.blit(t4, (r1.x + 8, hud_y + 58))
+
         # -------------------------------------------------------------
-        # PANEL 2 (CENTER): 90 deg FOV from rays + map wireframe
+        # PANEL 2 (CENTER): 3D POV from 90 deg FOV rays + map wireframe
         # -------------------------------------------------------------
         t_p2 = self.font_title.render("90 deg FOV from rays + map wireframe", True, COLOR_TEXT_MAIN)
         canvas.blit(t_p2, (r2.x + 12, r2.y + 10))
 
-        # Center area for map wireframe
-        map_rect = pygame.Rect(r2.x + 10, r2.y + 32, PANEL_W - 20, PANEL_H - 44)
-        pygame.draw.rect(canvas, (14, 14, 18), map_rect, border_radius=4)
-        pygame.draw.rect(canvas, COLOR_BORDER, map_rect, width=1, border_radius=4)
+        pov_rect = pygame.Rect(r2.x + 8, r2.y + 32, PANEL_W - 16, PANEL_H - 42)
+        pygame.draw.rect(canvas, (14, 14, 18), pov_rect, border_radius=4)
+        pygame.draw.rect(canvas, COLOR_BORDER, pov_rect, width=1, border_radius=4)
 
-        px, py = priv.get("x", 0.0), priv.get("y", 0.0)
+        px, py, pz = priv.get("x", 0.0), priv.get("y", 0.0), priv.get("z", 0.0)
         p_ang = priv.get("angle", 0.0)  # degrees
         rad = math.radians(p_ang)
+        cos_a, sin_a = math.cos(rad), math.sin(rad)
+        eye_z = pz + 41.0  # Doom player eye height
 
-        # Auto-scale map around player
-        cx = map_rect.centerx
-        cy = map_rect.centery
-        scale_map = 0.22  # map units to screen pixels
+        fov_w = pov_rect.width
+        fov_h = pov_rect.height
+        fov_cx = pov_rect.centerx
+        fov_cy = pov_rect.centery
+        # 90 deg horizontal FOV -> focal length = fov_w / 2
+        focal_x = fov_w * 0.5
+        focal_y = fov_w * 0.5
 
-        # Draw sector polygons
-        for _, lines in sector_polys:
+        # Clip surface to pov_rect so 3D lines don't spill outside Panel 2
+        old_clip = canvas.get_clip()
+        canvas.set_clip(pov_rect)
+
+        # 1. Draw 3D Map Wireframe from sector_polygons()
+        sec_floors = priv.get("sector_floor")
+        sec_ceils = priv.get("sector_ceiling")
+
+        def world_to_cam(wx: float, wy: float) -> tuple[float, float]:
+            dx = wx - px
+            dy = wy - py
+            # Forward = depth (cam_z), Left = -cam_x (right is positive screen X)
+            cam_z = dx * cos_a + dy * sin_a
+            cam_x = dx * sin_a - dy * cos_a
+            return cam_x, cam_z
+
+        def project_pt(cam_x: float, cam_z: float, wz: float) -> tuple[int, int]:
+            sx = int(fov_cx + (cam_x / cam_z) * focal_x)
+            sy = int(fov_cy - ((wz - eye_z) / cam_z) * focal_y)
+            return sx, sy
+
+        for sec_idx, (sec_id, lines) in enumerate(sector_polys):
+            fl_h = float(sec_floors[sec_idx]) if (sec_floors is not None and sec_idx < len(sec_floors)) else 0.0
+            cl_h = float(sec_ceils[sec_idx]) if (sec_ceils is not None and sec_idx < len(sec_ceils)) else 128.0
             for ln in lines:
-                x1, y1, x2, y2 = ln
-                sx1 = int(cx + (x1 - px) * scale_map)
-                sy1 = int(cy - (y1 - py) * scale_map)
-                sx2 = int(cx + (x2 - px) * scale_map)
-                sy2 = int(cy - (y2 - py) * scale_map)
-                if map_rect.collidepoint(sx1, sy1) or map_rect.collidepoint(sx2, sy2):
-                    pygame.draw.line(canvas, (75, 85, 110), (sx1, sy1), (sx2, sy2), 1)
+                x1, y1, x2, y2 = float(ln[0]), float(ln[1]), float(ln[2]), float(ln[3])
+                cx1, cz1 = world_to_cam(x1, y1)
+                cx2, cz2 = world_to_cam(x2, y2)
 
-        # Draw Ray Traces in Wireframe View
+                # Near-plane clip at z = 8.0
+                if cz1 < 8.0 and cz2 < 8.0:
+                    continue
+                if cz1 < 8.0:
+                    t = (8.0 - cz1) / (cz2 - cz1)
+                    cx1 = cx1 + t * (cx2 - cx1)
+                    cz1 = 8.0
+                elif cz2 < 8.0:
+                    t = (8.0 - cz2) / (cz1 - cz2)
+                    cx2 = cx2 + t * (cx1 - cx2)
+                    cz2 = 8.0
+
+                p1_bot = project_pt(cx1, cz1, fl_h)
+                p2_bot = project_pt(cx2, cz2, fl_h)
+                p1_top = project_pt(cx1, cz1, cl_h)
+                p2_top = project_pt(cx2, cz2, cl_h)
+
+                wire_col = (95, 100, 115)
+                pygame.draw.line(canvas, wire_col, p1_bot, p2_bot, 1)
+                pygame.draw.line(canvas, wire_col, p1_top, p2_top, 1)
+                pygame.draw.line(canvas, (70, 75, 90), p1_bot, p1_top, 1)
+                pygame.draw.line(canvas, (70, 75, 90), p2_bot, p2_top, 1)
+
+        # 2. Draw 3D Raycast Columns across 90-degree FOV (-45 deg to +45 deg)
+        # Ray 0 is straight ahead, counter-clockwise (1..8 = left, 56..63 = right)
         rays_dist = obs["rays"]["distance"] * 1024.0
         rays_type = obs["rays"]["hit_type"]
         num_rays = len(rays_dist)
-        for i in range(num_rays):
-            # Ray 0 is ahead, counter-clockwise
-            ray_angle = rad + i * (2.0 * math.pi / num_rays)
-            rd = rays_dist[i] * scale_map
-            rx = int(cx + rd * math.cos(ray_angle))
-            ry = int(cy - rd * math.sin(ray_angle))
-            ht = int(rays_type[i])
-            c = HIT_COLORS.get(ht, COLOR_GRAY)
 
-            # Highlight 90 deg forward cone
-            is_forward_cone = (i <= 4) or (i >= 60)
-            if is_forward_cone:
-                pygame.draw.line(canvas, (c[0] // 2, c[1] // 2, c[2] // 2), (cx, cy), (rx, ry), 1)
-            if ht > 0:
-                pygame.draw.circle(canvas, c, (rx, ry), 2)
+        fov_ray_indices = list(range(8, -1, -1)) + list(range(63, 55, -1))  # Left (+45) to Right (-45)
+        ray_fill_colors = {
+            0: (40, 42, 52),
+            1: (175, 170, 190),   # Wall: lavender-gray
+            2: (50, 175, 245),    # Door: cyan-blue
+            3: (210, 70, 230),    # Locked door: magenta
+            4: (245, 55, 55),     # Enemy: bright red
+            5: (65, 225, 95),     # Item: bright green
+        }
+        col_w = max(4, int(fov_w / len(fov_ray_indices)) + 1)
 
-        # Draw Player in Wireframe View
-        pygame.draw.circle(canvas, COLOR_GREEN, (cx, cy), 5)
-        dir_x = int(cx + 18 * math.cos(rad))
-        dir_y = int(cy - 18 * math.sin(rad))
-        pygame.draw.line(canvas, COLOR_WHITE, (cx, cy), (dir_x, dir_y), 2)
+        for idx in fov_ray_indices:
+            # Signed angle in radians: positive = left, negative = right
+            ang_deg = (idx if idx <= 32 else idx - num_rays) * (360.0 / num_rays)
+            rel_rad = math.radians(ang_deg)
+            # Project onto screen X (left is -X, right is +X)
+            screen_x = fov_cx - math.tan(rel_rad) * focal_x
+            dist = max(16.0, float(rays_dist[idx]) * math.cos(rel_rad))
+            ht = int(rays_type[idx])
+            if ht == 0 and rays_dist[idx] >= 1023.0:
+                continue
+
+            bar_h = min(fov_h - 12, int((56.0 / dist) * focal_y))
+            bx = int(screen_x - col_w / 2)
+            by = int(fov_cy - bar_h / 2)
+            col = ray_fill_colors.get(ht, (150, 150, 160))
+            pygame.draw.rect(canvas, col, (bx, by, col_w, bar_h))
+            if ht in (2, 3, 4, 5):
+                pygame.draw.rect(canvas, COLOR_WHITE, (bx, by, col_w, bar_h), width=1)
+
+        # 3. Project visible_entities markers + center crosshair in FOV
+        ents = obs["visible_entities"]
+        for i in range(len(ents["mask"])):
+            if ents["mask"][i] == 1:
+                feat = ents["features"][i]
+                edist = max(16.0, float(feat[0]) * 1024.0)
+                sin_e, cos_e = float(feat[1]), float(feat[2])
+                if cos_e > 0.1:
+                    ex = int(fov_cx - (sin_e / cos_e) * focal_x)
+                    ey = int(fov_cy + (12.0 / (edist * cos_e)) * focal_y)
+                    etype = int(ents["entity_type"][i])
+                    ecol = COLOR_RED if etype == 1 else COLOR_GREEN
+                    pygame.draw.circle(canvas, ecol, (ex, ey), 6, width=2)
+
+        # Center crosshair (+)
+        pygame.draw.line(canvas, COLOR_WHITE, (fov_cx - 6, fov_cy), (fov_cx + 6, fov_cy), 1)
+        pygame.draw.line(canvas, COLOR_WHITE, (fov_cx, fov_cy - 6), (fov_cx, fov_cy + 6), 1)
+        canvas.set_clip(old_clip)
 
         # -------------------------------------------------------------
         # PANEL 3 (RIGHT): DATA (privileged) + Polar Radar (UP = ahead)
         # -------------------------------------------------------------
-        t_p3 = self.font_title.render("DATA (privileged is training-only)", True, COLOR_TEXT_MAIN)
+        t_p3 = self.font_title.render("DATA (privileged is training-only)", True, COLOR_TEXT_HIGHLIGHT)
         canvas.blit(t_p3, (r3.x + 12, r3.y + 10))
 
         # Text Stats
@@ -298,38 +380,61 @@ class VisualizerHUD:
         kills = priv.get("kills", 0)
         items = priv.get("items", 0)
         dmg = priv.get("damage_taken", 0.0)
+        wpn_id = int(obs["vitals"][2])
+        wpn_names = {1: "fist", 2: "pistol", 3: "shotgun", 4: "chaingun", 5: "rocket", 6: "plasma", 7: "bfg"}
+        wpn_str = wpn_names.get(wpn_id, f"wpn{wpn_id}")
 
         # Count ray hit categories
         w_cnt = int(np.sum(rays_type == 1))
         e_cnt = int(np.sum(rays_type == 4))
         d_cnt = int(np.sum(rays_type == 2))
+        l_cnt = int(np.sum(rays_type == 3))
         i_cnt = int(np.sum(rays_type == 5))
 
         stats = [
-            f"pos {px:6.0f},{py:<6.0f} ang {p_ang:<4.0f}",
-            f"tic {tic:<4d}/{max_tic:<4d}  step {step:<4d}  rew {episode_return:<+5.2f}",
-            f"hp {hp:<3.0f} arm {armor:<3.0f} pistol ammo {ammo:<3.0f}",
-            f"vel {vel_fwd:<+4.1f} {vel_rt:<+4.1f} keys -",
+            f"pos {px:5.0f},{py:<5.0f} ang {p_ang:<4.0f}",
+            f"tic {tic:<4d}/{max_tic:<4d} step {step:<4d} ret {episode_return:<+5.2f}",
+            f"hp {hp:<3.0f} arm {armor:<3.0f} {wpn_str} ammo {ammo:<3.0f}",
+            f"vel {vel_fwd:<+4.1f} {vel_rt:<+4.1f} keys {keys_str}",
             f"kills {kills:<2d} items {items:<2d} dmg {dmg:<3.0f}",
-            f"rays: w={w_cnt:<2d}, e={e_cnt:<2d}, d={d_cnt:<2d}, i={i_cnt:<2d}",
+            f"rays w={w_cnt:<2d}, e={e_cnt:<2d}, d={d_cnt + l_cnt:<2d}, i={i_cnt:<2d}",
             f"visible_entities {n_ents}/32 (90 deg + LOS)",
         ]
-        stat_y = r3.y + 30
+        stat_y = r3.y + 32
         for s in stats:
-            ts = self.font_small.render(s, True, COLOR_TEXT_DIM if "rays" not in s else COLOR_TEXT_MAIN)
+            ts = self.font_small.render(s, True, COLOR_TEXT_MAIN if ("rays" in s or "visible" in s) else COLOR_TEXT_DIM)
             canvas.blit(ts, (r3.x + 12, stat_y))
-            stat_y += 15
+            stat_y += 16
 
         # Polar Radar Section
-        radar_title = self.font_small.render(f"UP = ahead | visible_entities {n_ents} (90 deg FOV)", True, COLOR_TEXT_HIGHLIGHT)
-        canvas.blit(radar_title, (r3.x + 12, stat_y + 8))
+        radar_h1 = self.font_small.render("UP = ahead", True, COLOR_TEXT_HIGHLIGHT)
+        radar_h2 = self.font_small.render(f"visible_entities {n_ents} (90 deg FOV)", True, COLOR_TEXT_MAIN)
+        canvas.blit(radar_h1, (r3.x + 12, stat_y + 10))
+        canvas.blit(radar_h2, (r3.x + 12, stat_y + 26))
 
-        radar_cx = r3.x + PANEL_W // 2
-        radar_cy = stat_y + 115
-        max_radar_r = 75
+        # Legend on the left side below radar title (matching screenshot)
+        legend_y = stat_y + 52
+        items_legend = [
+            ("none", (90, 90, 105)),
+            ("wall", COLOR_GRAY),
+            ("door", COLOR_CYAN),
+            ("locked door", COLOR_MAGENTA),
+            ("enemy", COLOR_RED),
+            ("item", COLOR_GREEN),
+        ]
+        for name, col in items_legend:
+            pygame.draw.circle(canvas, col, (r3.x + 20, legend_y + 5), 4)
+            tl = self.font_small.render(name, True, COLOR_TEXT_DIM)
+            canvas.blit(tl, (r3.x + 30, legend_y - 2))
+            legend_y += 18
 
-        # Draw concentric range circles (256, 512, 768, 1024)
-        for r_step in (25, 50, 75):
+        # Radar Circle on the right side of Panel 3 bottom
+        radar_cx = r3.x + PANEL_W - 115
+        radar_cy = stat_y + 125
+        max_radar_r = 85
+
+        # Draw concentric range circles
+        for r_step in (28, 56, 85):
             pygame.draw.circle(canvas, (38, 40, 52), (radar_cx, radar_cy), r_step, 1)
 
         # Draw 90 deg FOV cone lines (-45 deg to +45 deg from UP)
@@ -339,8 +444,8 @@ class VisualizerHUD:
         y_fov1 = int(radar_cy - max_radar_r * math.sin(fov_rad1))
         x_fov2 = int(radar_cx + max_radar_r * math.cos(fov_rad2))
         y_fov2 = int(radar_cy - max_radar_r * math.sin(fov_rad2))
-        pygame.draw.line(canvas, (55, 60, 75), (radar_cx, radar_cy), (x_fov1, y_fov1), 1)
-        pygame.draw.line(canvas, (55, 60, 75), (radar_cx, radar_cy), (x_fov2, y_fov2), 1)
+        pygame.draw.line(canvas, (65, 70, 88), (radar_cx, radar_cy), (x_fov1, y_fov1), 1)
+        pygame.draw.line(canvas, (65, 70, 88), (radar_cx, radar_cy), (x_fov2, y_fov2), 1)
 
         # Plot 64 Rays on Polar Radar (index 0 is UP, index 16 is LEFT)
         for i in range(num_rays):
@@ -350,44 +455,29 @@ class VisualizerHUD:
             rx = int(radar_cx + rr * math.cos(theta))
             ry = int(radar_cy - rr * math.sin(theta))
             ht = int(rays_type[i])
+            c = HIT_COLORS.get(ht, COLOR_GRAY)
             if ht > 0:
-                c = HIT_COLORS.get(ht, COLOR_GRAY)
+                pygame.draw.line(canvas, (c[0] // 3, c[1] // 3, c[2] // 3), (radar_cx, radar_cy), (rx, ry), 1)
                 pygame.draw.circle(canvas, c, (rx, ry), 2)
 
-        # Plot visible entities in 90 deg FOV
-        ents = obs["visible_entities"]
+        # Plot visible entities + velocity vectors inside 90 deg FOV
         for i in range(len(ents["mask"])):
             if ents["mask"][i] == 1:
                 feat = ents["features"][i]  # [dist/1024, sin(rel), cos(rel), vel_fwd, vel_rt]
-                edist = feat[0] * max_radar_r
-                # rel_angle: 0 is ahead (UP), positive is left
-                sin_ang = feat[1]
-                cos_ang = feat[2]
+                edist = min(1.0, float(feat[0])) * max_radar_r
+                sin_ang, cos_ang = float(feat[1]), float(feat[2])
                 ex = int(radar_cx - edist * sin_ang)
                 ey = int(radar_cy - edist * cos_ang)
                 etype = int(ents["entity_type"][i])
                 ecolor = COLOR_RED if etype == 1 else COLOR_GREEN
                 pygame.draw.circle(canvas, ecolor, (ex, ey), 4)
+                # Velocity vector
+                vx = int(ex + float(feat[4]) * 1.5)
+                vy = int(ey - float(feat[3]) * 1.5)
+                pygame.draw.line(canvas, ecolor, (ex, ey), (vx, vy), 1)
 
         # Player center dot on radar
         pygame.draw.circle(canvas, COLOR_WHITE, (radar_cx, radar_cy), 3)
-
-        # Legend at bottom
-        legend_y = r3.y + PANEL_H - 24
-        items_legend = [
-            ("none", (80, 80, 90)),
-            ("wall", COLOR_GRAY),
-            ("door", COLOR_CYAN),
-            ("locked", COLOR_MAGENTA),
-            ("enemy", COLOR_RED),
-            ("item", COLOR_GREEN),
-        ]
-        leg_x = r3.x + 12
-        for name, col in items_legend:
-            pygame.draw.circle(canvas, col, (leg_x, legend_y + 4), 3)
-            tl = self.font_small.render(name, True, COLOR_TEXT_DIM)
-            canvas.blit(tl, (leg_x + 6, legend_y - 2))
-            leg_x += 62
 
         if not self.headless:
             pygame.display.flip()
@@ -430,7 +520,7 @@ def main():
         print(f"Note: DoomAgent load fallback ({exc}); switching to teacher bot mode.")
         mode = "teacher"
 
-    teacher_bot = TeacherBot()
+    teacher_bot = ExpertSpeedrunTeacher(env)
     hud = VisualizerHUD(headless=args.headless)
 
     # Optional video writer

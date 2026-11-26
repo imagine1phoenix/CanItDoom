@@ -55,6 +55,13 @@ class DoomAgent:
         self.model.eval()
 
         self.hx: torch.Tensor | None = None
+        self.deterministic: bool = False
+        self.temperature: float = 0.2
+
+    def set_eval_mode(self, deterministic: bool = False, temperature: float = 0.2) -> None:
+        """Configures inference mode (stochastic temperature sampling or greedy)."""
+        self.deterministic = bool(deterministic)
+        self.temperature = max(1e-4, float(temperature))
 
     def reset(self) -> None:
         """Called before every map. Clear recurrent state and trackers."""
@@ -80,6 +87,12 @@ class DoomAgent:
         }
 
         with torch.no_grad():
-            action, _, _, _, self.hx = self.model.step(obs_tensor, self.hx, deterministic=True)
+            if self.deterministic:
+                action, _, _, _, self.hx = self.model.step(obs_tensor, self.hx, deterministic=True)
+            else:
+                features = self.model.extract_features(obs_tensor).unsqueeze(1)
+                out, self.hx = self.model.gru(features, self.hx)
+                logits = self.model.actor_head(out.squeeze(1)) / self.temperature
+                action = torch.distributions.Bernoulli(logits=logits).sample()
 
         return action.squeeze(0).cpu().numpy().astype(np.int8)

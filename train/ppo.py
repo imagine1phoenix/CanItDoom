@@ -45,6 +45,7 @@ class RewardShaper:
 
     def reset(self, priv: dict) -> None:
         self.visited_cells = set()
+        self.steps = 0
         self.last_kills = priv.get("kills", 0)
         self.last_damage = priv.get("damage_taken", 0.0)
         keys = priv.get("keys", 0)
@@ -73,12 +74,15 @@ class RewardShaper:
         self.visited_cells.add(cell)
 
     def shape(self, raw_reward: float, priv: dict) -> tuple[float, dict]:
-        shaped = -0.001  # Small step penalty to encourage efficiency
+        self.steps += 1
+        shaped = -0.008  # Strong time-urgency step penalty to finish stages quickly
         events = {}
 
-        # 1. Goal reaching
+        # 1. Goal reaching + speedrun completion bonus
         if priv.get("exit_reached", False):
-            shaped += 10.0
+            max_steps = max(1, priv.get("episode_ticks", 2100) // 4)
+            speed_bonus = 5.0 * max(0.0, 1.0 - (self.steps / max_steps))
+            shaped += 12.0 + speed_bonus
             events["exit"] = True
 
         # 2. Death penalty
@@ -90,7 +94,7 @@ class RewardShaper:
         kills = priv.get("kills", 0)
         delta_kills = kills - self.last_kills
         if delta_kills > 0:
-            shaped += 1.0 * delta_kills
+            shaped += 1.5 * delta_kills
             events["kill"] = delta_kills
             self.last_kills = kills
 
@@ -115,7 +119,7 @@ class RewardShaper:
             events["key"] = new_keys
             self.last_keys = current_keys
 
-        # 5b. Door opening (+0.5 per newly opened door)
+        # 5b. Door opening (+1.0 per newly opened door)
         if self.initially_closed is not None and self.opened_doors is not None:
             ceil = priv.get("sector_ceiling")
             floor = priv.get("sector_floor")
@@ -124,7 +128,7 @@ class RewardShaper:
                 newly_opened = now_open & (~self.opened_doors)
                 num_new_doors = int(np.sum(newly_opened))
                 if num_new_doors > 0:
-                    shaped += 0.5 * num_new_doors
+                    shaped += 1.0 * num_new_doors
                     events["door"] = num_new_doors
                     self.opened_doors |= newly_opened
 
@@ -133,7 +137,7 @@ class RewardShaper:
         cell = (int(x // self.grid_size), int(y // self.grid_size))
         if cell not in self.visited_cells:
             self.visited_cells.add(cell)
-            shaped += 0.05
+            shaped += 0.08
             events["new_cell"] = True
 
         return shaped, events

@@ -33,8 +33,10 @@ THING_RED_CARD = 13
 THING_YELLOW_CARD = 6
 
 # Linedef specials
-SPECIAL_DOOR_OPEN = 11       # Exit / Door
-SPECIAL_EXIT_SWITCH = 243    # Exit_Normal
+SPECIAL_DOOR_RAISE = 12       # Door_Raise(tag, speed, delay)
+SPECIAL_DOOR_LOCKED = 13      # Door_LockedRaise(tag, speed, delay, lock)
+SPECIAL_EXIT_NORMAL = 243     # Exit_Normal(pos)
+LOCK_BLUE_CARD = 2            # Blue keycard / skull lock number in ZDoom
 
 
 @dataclass
@@ -92,6 +94,12 @@ class MapBuilder:
         blocking: bool = True,
         special: int = 0,
         arg0: int = 0,
+        arg1: int = 0,
+        arg2: int = 0,
+        arg3: int = 0,
+        playeruse: bool = False,
+        playercross: bool = False,
+        repeatspecial: bool = False,
     ) -> int:
         ld = {
             "v1": v1,
@@ -107,8 +115,19 @@ class MapBuilder:
                 ld["blocking"] = False
         if special > 0:
             ld["special"] = special
-            if arg0 > 0:
-                ld["arg0"] = arg0
+            ld["arg0"] = arg0
+            if arg1 > 0:
+                ld["arg1"] = arg1
+            if arg2 > 0:
+                ld["arg2"] = arg2
+            if arg3 > 0:
+                ld["arg3"] = arg3
+        if playeruse:
+            ld["playeruse"] = True
+        if playercross:
+            ld["playercross"] = True
+        if repeatspecial:
+            ld["repeatspecial"] = True
         self.linedefs.append(ld)
         return len(self.linedefs) - 1
 
@@ -185,8 +204,12 @@ class MapBuilder:
                 parts.append("dontpegbottom = true")
             if "special" in l:
                 parts.append(f"special = {l['special']}")
-            if "arg0" in l:
-                parts.append(f"arg0 = {l['arg0']}")
+            for ak in ("arg0", "arg1", "arg2", "arg3"):
+                if ak in l:
+                    parts.append(f"{ak} = {l[ak]}")
+            for fk in ("playeruse", "playercross", "repeatspecial"):
+                if l.get(fk):
+                    parts.append(f"{fk} = true")
             lines.append(f"linedef {{ {'; '.join(parts)}; }}\n")
         for t in self.things:
             parts = [
@@ -198,100 +221,166 @@ class MapBuilder:
 
 
 def generate_curriculum_map(stage: int = 1, seed: int = 42) -> MapBuilder:
-    """Generates a procedural map matching curriculum requirements."""
+    """Generates a solvable procedural UDMF map matching curriculum requirements.
+
+    - Stage 1: Open corridor & rooms leading to GATE3 walkover exit pad
+    - Stage 2: Combat arena with enemies & shotgun before exit pad
+    - Stage 3: Closed manual door (special=12) funneling agent cleanly to Room 2 & exit
+    - Stage 4: Blue Keycard in Room 1 -> Closed Blue Locked Door (special=13, arg3=2) -> Exit
+    """
     rng = random.Random(seed)
     mb = MapBuilder()
 
-    # Room 1: Player Start Room (always present)
+    # Room 1: Player Start Room
     r1_x1, r1_y1 = 64.0, 128.0
-    r1_w, r1_h = rng.randint(320, 512), rng.randint(320, 512)
+    r1_w, r1_h = rng.randint(288, 416), rng.randint(288, 416)
     r1_x2, r1_y2 = r1_x1 + r1_w, r1_y1 + r1_h
     sec1 = mb.add_sector(floor_h=0, ceil_h=128, floor_tex="FLOOR0_1")
 
-    # Room 2: Goal/Corridor Room
-    corridor_w = 96.0 if stage == 3 else 128.0
-    r2_x1 = r1_x2 + corridor_w
-    r2_y1 = r1_y1 + (r1_h - 384.0) / 2.0
-    r2_w, r2_h = rng.randint(384, 512), 384.0
+    # Door / Corridor dimensions (narrower on Stage 3/4 so agent squares up cleanly on door)
+    has_door = stage in (3, 4)
+    corridor_len = 64.0 if has_door else 96.0
+    door_h = 96.0 if has_door else 112.0
+
+    # Random vertical shift so the agent learns spatial steering rather than blind straight line
+    max_shift = max(0, int((r1_h - door_h) / 2 - 48))
+    y_shift = rng.randint(-max_shift, max_shift) if max_shift > 0 else 0
+    door_y_bot = r1_y1 + (r1_h - door_h) / 2.0 + y_shift
+    door_y_top = door_y_bot + door_h
+
+    # Room 2: Goal Room
+    r2_x1 = r1_x2 + corridor_len
+    r2_h = 320.0
+    r2_y1 = door_y_bot + (door_h - r2_h) / 2.0
+    r2_w = rng.randint(288, 416)
     r2_x2, r2_y2 = r2_x1 + r2_w, r2_y1 + r2_h
     sec2 = mb.add_sector(floor_h=0, ceil_h=128, floor_tex="FLOOR4_8")
 
-    # Corridor connecting Room 1 and Room 2
-    sec_corr = mb.add_sector(floor_h=0, ceil_h=128, floor_tex="FLOOR0_3")
+    # Door / Corridor Sector (ceil_h=0 when door starts closed!)
+    sec_corr = mb.add_sector(
+        floor_h=0,
+        ceil_h=0 if has_door else 128,
+        floor_tex="FLAT5_4" if has_door else "FLOOR0_3",
+    )
 
-    # Construct vertices
-    # Room 1 vertices
+    # Exit Pad Sector attached to East wall of Room 2
+    exit_h = 96.0
+    exit_shift = rng.randint(-64, 64)
+    exit_y_bot = r2_y1 + (r2_h - exit_h) / 2.0 + exit_shift
+    exit_y_top = exit_y_bot + exit_h
+    sec_exit = mb.add_sector(floor_h=0, ceil_h=128, floor_tex="GATE3", light=255)
+
+    # Vertices
     v0 = mb.add_vertex(r1_x1, r1_y1)
     v1 = mb.add_vertex(r1_x1, r1_y2)
     v2 = mb.add_vertex(r1_x2, r1_y2)
-    v3_top = mb.add_vertex(r1_x2, r2_y1 + corridor_w)
-    v3_bot = mb.add_vertex(r1_x2, r2_y1)
-    v4 = mb.add_vertex(r1_x2, r1_y1)
+    v_p1_top = mb.add_vertex(r1_x2, door_y_top)
+    v_p1_bot = mb.add_vertex(r1_x2, door_y_bot)
+    v3 = mb.add_vertex(r1_x2, r1_y1)
 
-    # Room 2 vertices
-    v5_bot = mb.add_vertex(r2_x1, r2_y1)
-    v5_top = mb.add_vertex(r2_x1, r2_y1 + corridor_w)
-    v6 = mb.add_vertex(r2_x1, r2_y2)
-    v7 = mb.add_vertex(r2_x2, r2_y2)
-    v8 = mb.add_vertex(r2_x2, r2_y1)
+    v_p2_top = mb.add_vertex(r2_x1, door_y_top)
+    v_p2_bot = mb.add_vertex(r2_x1, door_y_bot)
+    v5 = mb.add_vertex(r2_x1, r2_y2)
+    v6 = mb.add_vertex(r2_x2, r2_y2)
+    v_ex_top = mb.add_vertex(r2_x2, exit_y_top)
+    v_ex_bot = mb.add_vertex(r2_x2, exit_y_bot)
+    v7 = mb.add_vertex(r2_x2, r2_y1)
+    v8 = mb.add_vertex(r2_x1, r2_y1)
 
-    # Outer boundary Room 1
+    v_ex_tr = mb.add_vertex(r2_x2 + 64.0, exit_y_top)
+    v_ex_br = mb.add_vertex(r2_x2 + 64.0, exit_y_bot)
+
+    # Outer walls of Room 1 (clockwise -> front inside sec1)
     s_r1 = mb.add_sidedef(sec1, mid_tex="STARTAN2")
     mb.add_linedef(v0, v1, s_r1, blocking=True)
     mb.add_linedef(v1, v2, s_r1, blocking=True)
-    mb.add_linedef(v2, v3_top, s_r1, blocking=True)
-    mb.add_linedef(v3_bot, v4, s_r1, blocking=True)
-    mb.add_linedef(v4, v0, s_r1, blocking=True)
+    mb.add_linedef(v2, v_p1_top, s_r1, blocking=True)
+    mb.add_linedef(v_p1_bot, v3, s_r1, blocking=True)
+    mb.add_linedef(v3, v0, s_r1, blocking=True)
 
-    # Outer boundary Room 2
-    s_r2 = mb.add_sidedef(sec2, mid_tex="STARTAN2")
-    mb.add_linedef(v5_top, v6, s_r2, blocking=True)
-    mb.add_linedef(v6, v7, s_r2, blocking=True)
+    # Outer walls of Room 2 (clockwise -> front inside sec2)
+    s_r2 = mb.add_sidedef(sec2, mid_tex="STONE2")
+    mb.add_linedef(v_p2_top, v5, s_r2, blocking=True)
+    mb.add_linedef(v5, v6, s_r2, blocking=True)
+    mb.add_linedef(v6, v_ex_top, s_r2, blocking=True)
+    mb.add_linedef(v_ex_bot, v7, s_r2, blocking=True)
     mb.add_linedef(v7, v8, s_r2, blocking=True)
-    mb.add_linedef(v8, v5_bot, s_r2, blocking=True)
+    mb.add_linedef(v8, v_p2_bot, s_r2, blocking=True)
 
-    # Corridor walls (top and bottom)
-    s_corr = mb.add_sidedef(sec_corr, mid_tex="STARTAN2")
-    mb.add_linedef(v3_top, v5_top, s_corr, blocking=True)
-    mb.add_linedef(v5_bot, v3_bot, s_corr, blocking=True)
+    # Corridor / Door side walls (front inside sec_corr)
+    side_tex = "DOORTRAK" if has_door else "STARTAN2"
+    s_corr = mb.add_sidedef(sec_corr, mid_tex=side_tex)
+    mb.add_linedef(v_p1_top, v_p2_top, s_corr, blocking=True)
+    mb.add_linedef(v_p2_bot, v_p1_bot, s_corr, blocking=True)
 
-    # Portals: Room1 <-> Corr, Corr <-> Room2
-    s_r1_portal = mb.add_sidedef(sec1, mid_tex="-")
+    # Portals: Room1 <-> Door/Corr, Door/Corr <-> Room2
+    door_upper = "BIGDOOR2" if stage == 3 else ("BIGDOOR4" if stage >= 4 else "-")
+    s_r1_portal = mb.add_sidedef(sec1, mid_tex="-", top_tex=door_upper)
     s_corr_p1 = mb.add_sidedef(sec_corr, mid_tex="-")
-    mb.add_linedef(v3_bot, v3_top, s_r1_portal, s_corr_p1, blocking=False)
-
+    s_r2_portal = mb.add_sidedef(sec2, mid_tex="-", top_tex=door_upper)
     s_corr_p2 = mb.add_sidedef(sec_corr, mid_tex="-")
-    s_r2_portal = mb.add_sidedef(sec2, mid_tex="-")
-    
-    # In Stage 3 or 4, place a door between corridor and Room 2
-    if stage in (3, 4):
-        # Door special on portal line (special 11: Door_Open or Door_Raise)
-        mb.add_linedef(v5_top, v5_bot, s_corr_p2, s_r2_portal, blocking=False, special=11)
-    else:
-        mb.add_linedef(v5_top, v5_bot, s_corr_p2, s_r2_portal, blocking=False)
 
-    # Player 1 Start in Room 1
-    mb.add_thing(r1_x1 + 96.0, r1_y1 + r1_h / 2.0, THING_PLAYER_START, angle=0)
+    if stage == 3:
+        mb.add_linedef(
+            v_p1_top, v_p1_bot, s_r1_portal, s_corr_p1, blocking=False,
+            special=SPECIAL_DOOR_RAISE, arg0=0, arg1=16, arg2=150,
+            playeruse=True, repeatspecial=True,
+        )
+        mb.add_linedef(
+            v_p2_bot, v_p2_top, s_r2_portal, s_corr_p2, blocking=False,
+            special=SPECIAL_DOOR_RAISE, arg0=0, arg1=16, arg2=150,
+            playeruse=True, repeatspecial=True,
+        )
+    elif stage >= 4:
+        mb.add_linedef(
+            v_p1_top, v_p1_bot, s_r1_portal, s_corr_p1, blocking=False,
+            special=SPECIAL_DOOR_LOCKED, arg0=0, arg1=16, arg2=150, arg3=LOCK_BLUE_CARD,
+            playeruse=True, repeatspecial=True,
+        )
+        mb.add_linedef(
+            v_p2_bot, v_p2_top, s_r2_portal, s_corr_p2, blocking=False,
+            special=SPECIAL_DOOR_LOCKED, arg0=0, arg1=16, arg2=150, arg3=LOCK_BLUE_CARD,
+            playeruse=True, repeatspecial=True,
+        )
+    else:
+        mb.add_linedef(v_p1_top, v_p1_bot, s_r1_portal, s_corr_p1, blocking=False)
+        mb.add_linedef(v_p2_bot, v_p2_top, s_r2_portal, s_corr_p2, blocking=False)
+
+    # Exit Pad Walkover Portal (Room 2 <-> sec_exit, special 243 playercross=true)
+    s_r2_exit = mb.add_sidedef(sec2, mid_tex="-")
+    s_exit_portal = mb.add_sidedef(sec_exit, mid_tex="-")
+    mb.add_linedef(
+        v_ex_top, v_ex_bot, s_r2_exit, s_exit_portal, blocking=False,
+        special=SPECIAL_EXIT_NORMAL, playercross=True,
+    )
+
+    # Exit Pad outer alcove walls (front inside sec_exit)
+    s_exit_wall = mb.add_sidedef(sec_exit, mid_tex="GRAY1")
+    mb.add_linedef(v_ex_top, v_ex_tr, s_exit_wall, blocking=True)
+    mb.add_linedef(v_ex_tr, v_ex_br, s_exit_wall, blocking=True)
+    mb.add_linedef(v_ex_br, v_ex_bot, s_exit_wall, blocking=True)
+
+    # Player 1 Start in Room 1 (with slightly randomized initial angle toward East)
+    start_ang = rng.choice([0, 15, 345, 30, 330])
+    mb.add_thing(r1_x1 + 80.0, r1_y1 + r1_h / 2.0, THING_PLAYER_START, angle=start_ang)
 
     # Stage-specific things
     if stage == 1:
-        # Simple navigation target: Exit switch in Room 2
-        mb.add_thing(r2_x2 - 64.0, r2_y1 + r2_h / 2.0, THING_MEDIKIT)
+        mb.add_thing(r2_x2 - 96.0, exit_y_bot + exit_h / 2.0, THING_STIMPACK)
     elif stage == 2:
-        # Combat arena: Enemies + Ammo in Room 2
-        mb.add_thing(r2_x2 - 96.0, r2_y1 + r2_h / 2.0, THING_ZOMBIEMAN, angle=180)
-        mb.add_thing(r2_x2 - 160.0, r2_y1 + 96.0, THING_IMP, angle=180)
-        mb.add_thing(r1_x1 + 160.0, r1_y1 + 96.0, THING_SHOTGUN)
-        mb.add_thing(r1_x1 + 160.0, r1_y2 - 96.0, THING_AMMO_SHELLS)
+        mb.add_thing(r2_x1 + r2_w * 0.55, r2_y1 + r2_h * 0.5, THING_ZOMBIEMAN, angle=180)
+        mb.add_thing(r2_x2 - 96.0, r2_y1 + 96.0, THING_IMP, angle=180)
+        mb.add_thing(r1_x1 + 144.0, r1_y1 + 80.0, THING_SHOTGUN)
+        mb.add_thing(r1_x1 + 144.0, r1_y2 - 80.0, THING_AMMO_SHELLS)
     elif stage == 3:
-        # Multi-room door exploration
-        mb.add_thing(r2_x2 - 96.0, r2_y1 + r2_h / 2.0, THING_ZOMBIEMAN, angle=180)
-        mb.add_thing(r2_x2 - 64.0, r2_y1 + 96.0, THING_MEDIKIT)
+        mb.add_thing(r2_x1 + r2_w * 0.55, r2_y1 + r2_h * 0.5, THING_ZOMBIEMAN, angle=180)
+        mb.add_thing(r2_x2 - 80.0, r2_y1 + 80.0, THING_MEDIKIT)
     elif stage >= 4:
-        # Keycard in Room 1, locked door sequence to exit
-        mb.add_thing(r1_x1 + 96.0, r1_y2 - 96.0, THING_BLUE_CARD)
-        mb.add_thing(r2_x2 - 96.0, r2_y1 + r2_h / 2.0, THING_DEMON, angle=180)
-        mb.add_thing(r2_x2 - 64.0, r2_y1 + 64.0, THING_MEDIKIT)
+        # Blue keycard in Room 1 near upper/lower corner so agent collects it before locked door
+        key_y = r1_y2 - 72.0 if (seed % 2 == 0) else r1_y1 + 72.0
+        mb.add_thing(r1_x1 + r1_w * 0.55, key_y, THING_BLUE_CARD)
+        mb.add_thing(r2_x1 + r2_w * 0.55, r2_y1 + r2_h * 0.5, THING_ZOMBIEMAN, angle=180)
+        mb.add_thing(r2_x2 - 80.0, r2_y1 + 80.0, THING_MEDIKIT)
 
     return mb
 
