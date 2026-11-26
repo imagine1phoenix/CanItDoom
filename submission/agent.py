@@ -82,6 +82,8 @@ class DoomAgent:
             self.hx = self.model.initial_state(batch_size=1, device=self.device)
         if self.mem_state is None:
             self.mem_state = self.model.initial_memory(batch_size=1, device=self.device)
+        if self.prev_action is None:
+            self.prev_action = self.model.initial_prev_action(batch_size=1, device=self.device)
 
         # Prepare ego-centric observations as batch-1 tensors on the target device
         obs_tensor = {
@@ -104,7 +106,8 @@ class DoomAgent:
                 self.mem_state,
                 prev_action=self.prev_action,
                 deterministic=self.deterministic,
+                temperature=self.temperature,
             )
-            self.prev_action = action
+            self.prev_action = action.detach()
 
         return action.squeeze(0).cpu().numpy().astype(np.int8)

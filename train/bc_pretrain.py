@@ -2,12 +2,12 @@
 """Recurrent Behavioral Cloning (BC) pretrainer from ExpertSpeedrunTeacher.
 
 Collects clean, non-circling, goal-directed speedrun demonstrations across
-Curriculum Stages 1-4 and two_rooms.wad using an expert teacher bot (in train/),
-and trains DoomActorCritic's feature extractors + GRU + actor head via BCEWithLogitsLoss.
-
-Result: Warm-starts submission/weights/model.pt so the neural network policy
-natively knows how to sprint forward, navigate corridors, interact with doors,
-pick up keycards, and engage enemies without spinning in circles.
+Curriculum Stages 1-4 and two_rooms.wad using a training-only teacher bot,
+and pre-trains the DoomActorCritic neural cluster:
+- Blended cluster logits vs teacher actions (BCEWithLogitsLoss)
+- Domain-masked specialist expert heads (Nav, Enemy, Door, Progression)
+- Action-wise ClusterRouter gating weights vs training-time situation labels
+- Full V1 EgoSpatialMemory topological map and landmark odometry unrolling
 """
 
 from __future__ import annotations
@@ -34,6 +34,11 @@ from doom_env import make_env
 from submission.model import DoomActorCritic
 from train.ppo import collate_obs
 from train.run import _atomic_torch_save, load_curriculum_catalog
+
+EXPERT_NAV = 0
+EXPERT_ENEMY = 1
+EXPERT_DOOR = 2
+EXPERT_PROG = 3
 
 
 def get_sector_center(env, sec_id: int) -> tuple[float, float]:
@@ -110,237 +115,329 @@ class ExpertSpeedrunTeacher:
         self.wp_idx = 0
         self.plan_waypoints()
 
-    def act(self, obs: dict) -> np.ndarray:
+    def act_with_expert(self, obs: dict) -> tuple[np.ndarray, int]:
+        """Returns (action, active_expert_id) for training-only specialist supervision."""
         action = np.zeros(9, dtype=np.int8)
         priv = self.env.privileged_state()
         px, py, pang = priv["x"], priv["y"], priv["angle"]
         v_ents = obs["visible_entities"]
 
-        # Combat: attack enemy in FOV while advancing
+        enemy_active = False
+        door_active = False
+        prog_active = False
+
+        # Combat: attack any visible hostile enemy in FOV (melee=1, hitscan=2, projectile=3)
         for i in range(len(v_ents["mask"])):
-            if v_ents["mask"][i] == 1 and v_ents["entity_type"][i] == 1:
-                feat = v_ents["features"][i]
-                sin_r, cos_r = feat[1], feat[2]
-                if cos_r > 0.05 and abs(sin_r) < 0.35:
-                    action[6] = 1  # ATTACK!
-                break
+            if v_ents["mask"][i] == 1:
+                etype = int(v_ents["entity_type"][i])
+                if etype in (1, 2, 3):
+                    enemy_active = True
+                    feat = v_ents["features"][i]
+                    sin_r, cos_r = feat[1], feat[2]
+                    if cos_r > 0.05 and abs(sin_r) < 0.35:
+                        action[6] = 1  # ATTACK
+                    break
+                if etype in (5, 6, 7, 8, 9) and v_ents["features"][i][0] < 0.45:
+                    prog_active = True
 
         ceil = priv.get("sector_ceiling")
         has_door = 2 in self.env.mapinfo.door_sectors
 
-        # Door interaction: if door is closed and close to door linedef
-        if has_door and ceil is not None and len(ceil) > 2 and ceil[2] < 50.0:
-            lines = self.env.mapinfo.sector_lines().get(2, [])
+        if has_door:
+            lines = self.env.mapinfo.sector_lines().get(2, np.zeros((0, 4)))
             if len(lines):
                 d_x = lines[:, [0, 2]].mean()
                 d_y = lines[:, [1, 3]].mean()
-                if math.hypot(d_x - px, d_y - py) < 110.0:
-                    if self.use_cooldown == 0:
-                        action[7] = 1  # USE
-                        self.use_cooldown = 14
+                door_dist = math.hypot(d_x - px, d_y - py)
+                if door_dist < 90.0:
+                    door_active = True
+                if door_dist < 110.0 and self.use_cooldown == 0:
+                    action[7] = 1  # USE
+                    self.use_cooldown = 14
 
         if self.use_cooldown > 0:
+            door_active = True
             self.use_cooldown -= 1
+
+        # Key/item ray or keycard waypoint tracking
+        ray_ht = obs["rays"]["hit_type"]
+        ray_dist = obs["rays"]["distance"]
+        if (self.door_idx > 0 and self.wp_idx < self.door_idx) or np.any((ray_ht == 5) & (ray_dist < 0.35)):
+            prog_active = True
+        if np.any(((ray_ht == 2) | (ray_ht == 3)) & (ray_dist < 0.09)):
+            door_active = True
 
         # Advance along waypoints
         while self.wp_idx < len(self.wps):
             tx, ty = self.wps[self.wp_idx]
             dist = math.hypot(tx - px, ty - py)
-            # Only hold at the door waypoint if the door is currently closed
-            if self.wp_idx == self.door_idx and has_door and ceil is not None and len(ceil) > 2 and ceil[2] < 50.0:
+            if self.wp_idx == self.door_idx and has_door and ceil is not None and len(ceil) > 2 and ceil[2] < 100.0:
                 break
-            if dist < 36.0 and self.wp_idx < len(self.wps) - 1:
+            if dist < 42.0:
                 self.wp_idx += 1
             else:
                 break
 
         if self.wp_idx < len(self.wps):
             tx, ty = self.wps[self.wp_idx]
-        else:
-            tx, ty = self.wps[-1]
+            dx, dy = tx - px, ty - py
+            t_ang = (math.degrees(math.atan2(dy, dx))) % 360.0
+            ang_diff = (t_ang - pang + 180.0) % 360.0 - 180.0
 
-        dx = tx - px
-        dy = ty - py
-        target_deg = math.degrees(math.atan2(dy, dx)) % 360
-        diff = (target_deg - pang + 180) % 360 - 180
-
-        if diff > 4:
-            action[4] = 1  # TURN_LEFT
-        elif diff < -4:
-            action[5] = 1  # TURN_RIGHT
-
-        if abs(diff) < 45:
             action[0] = 1  # MOVE_FORWARD
+            action[8] = 1  # SPEED (sprint)
 
-        return action
+            if ang_diff > 12.0:
+                action[4] = 1  # TURN_LEFT
+            elif ang_diff < -12.0:
+                action[5] = 1  # TURN_RIGHT
+
+            # Sharp turn braking to prevent overshoot
+            if abs(ang_diff) > 75.0:
+                action[0] = 0
+        else:
+            action[0] = 1
+            action[8] = 1
+
+        # Determine dominant specialist engine for supervised router label
+        if enemy_active:
+            exp_id = EXPERT_ENEMY
+        elif door_active:
+            exp_id = EXPERT_DOOR
+        elif prog_active:
+            exp_id = EXPERT_PROG
+        else:
+            exp_id = EXPERT_NAV
+
+        return action, exp_id
 
 
-# Backward compatibility alias
-ObsTeacherBot = ExpertSpeedrunTeacher
+def _chunk_episode(
+    ep_obs: list[dict],
+    ep_act: list[np.ndarray],
+    ep_done: list[float],
+    ep_exp: list[int],
+    seq_len: int,
+) -> list[tuple[list[dict], np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    """Chunks an episode trajectory into fixed seq_len windows with valid masks."""
+    chunks = []
+    T = len(ep_obs)
+    for start in range(0, T, seq_len):
+        end = min(start + seq_len, T)
+        length = end - start
+        obs_chunk = ep_obs[start:end]
+        act_chunk = np.zeros((seq_len, 9), dtype=np.float32)
+        done_chunk = np.zeros(seq_len, dtype=np.float32)
+        exp_chunk = np.zeros(seq_len, dtype=np.int64)
+        valid_chunk = np.zeros(seq_len, dtype=np.float32)
+
+        act_chunk[:length] = np.array(ep_act[start:end], dtype=np.float32)
+        done_chunk[:length] = np.array(ep_done[start:end], dtype=np.float32)
+        exp_chunk[:length] = np.array(ep_exp[start:end], dtype=np.int64)
+        valid_chunk[:length] = 1.0
+
+        if length < seq_len:
+            obs_chunk = obs_chunk + [obs_chunk[-1]] * (seq_len - length)
+
+        chunks.append((obs_chunk, act_chunk, done_chunk, exp_chunk, valid_chunk))
+    return chunks
 
 
 def collect_and_pretrain(
     steps: int = 40960,
-    seq_len: int = 64,
-    bc_epochs: int = 4,
+    seq_len: int = 32,
     batch_size: int = 16,
-    lr: float = 5e-4,
+    lr: float = 3e-4,
     device_name: str = "auto",
+    bc_epochs: int = 2,
 ) -> None:
-    """Collects expert speedrun demonstrations and pre-trains DoomActorCritic."""
+    """Collects expert speedrun demonstrations and pre-trains the neural cluster policy."""
     if device_name == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
         device = torch.device(device_name)
 
-    print(f"\n=======================================================")
-    print(f"  Behavioral Cloning (BC) Pretrainer")
-    print(f"  Target: {steps:,} steps | seq_len: {seq_len} | device: {device}")
-    print(f"=======================================================")
+    print("=======================================================")
+    print(f"  Neural Cluster BC Warm-Start Pretrainer")
+    print(f"  Target Steps: {steps:,} | SeqLen: {seq_len} | Device: {device}")
+    print("=======================================================")
 
     catalog = load_curriculum_catalog()
-    mixed_pool = [("maps/two_rooms.wad", "MAP01")]
+    all_wads = []
     for s in (1, 2, 3, 4):
-        mixed_pool.extend(catalog.get(s, [])[:15])
+        all_wads.extend(catalog.get(s, []))
+    two_rooms = REPO_ROOT / "env" / "doom_env" / "maps" / "two_rooms.wad"
+    if two_rooms.exists():
+        all_wads.append(str(two_rooms))
 
-    print(f"Loaded {len(mixed_pool)} diverse training maps across stages 1-4 + two_rooms.")
+    if not all_wads:
+        all_wads = [str(two_rooms)]
 
-    # Initialize model and optimizer
     model = DoomActorCritic(num_actions=9).to(device)
     optimizer = Adam(model.parameters(), lr=lr, eps=1e-5)
-    bce_loss_fn = nn.BCEWithLogitsLoss()
+    bce_none = nn.BCEWithLogitsLoss(reduction="none")
+    ce_none = nn.CrossEntropyLoss(reduction="none")
+
+    # Domain Action Ownership Masks (MultiBinary 9):
+    # [0: FWD, 1: BCK, 2: LFT, 3: RGT, 4: TL, 5: TR, 6: ATK, 7: USE, 8: SPD]
+    # Nav: Locomotion, turning, speed (does NOT own ATK or USE)
+    # Enemy: Combat strafing, turning, attack, speed
+    # Door: Approach, turning, USE, speed
+    # Progression: Search, turning, pickup, USE, speed
+    specialist_masks = torch.tensor(
+        [
+            [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0],  # Nav (0)
+            [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0],  # Enemy (1)
+            [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0],  # Door (2)
+            [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0],  # Progression (3)
+        ],
+        device=device,
+        dtype=torch.float32,
+    )
 
     collected_steps = 0
     exits_seen = 0
     kills_seen = 0
-    map_idx = 0
     t0 = time.time()
+    seq_buffer = []
 
-    # Pre-allocation buffer for sequence training
-    seq_obs_list = []
-    seq_act_list = []
-    seq_done_list = []
-
-    print("\nCollecting expert demonstrations and training recurrent trunk...")
-
+    wad_cycle = 0
     while collected_steps < steps:
-        wad, map_name = mixed_pool[map_idx % len(mixed_pool)]
-        map_idx += 1
+        wad_cycle += 1
+        item = all_wads[wad_cycle % len(all_wads)]
+        if isinstance(item, tuple):
+            wad_path, map_name = str(item[0]), str(item[1])
+        else:
+            wad_path, map_name = str(item), "MAP01"
+        try:
+            env = make_env(wad=wad_path, map_name=map_name, render_buffers=False, render_mode=None)
+        except Exception as e:
+            print(f"[Warning] Failed to load {wad_path}: {e}")
+            continue
 
-        env = make_env(wad, map_name=map_name, episode_ticks=2100)
-        obs, _ = env.reset(seed=100 + map_idx)
-        bot = ExpertSpeedrunTeacher(env)
+        obs, _ = env.reset()
+        teacher = ExpertSpeedrunTeacher(env)
 
-        ep_obs, ep_act, ep_done = [], [], []
+        ep_obs: list[dict] = []
+        ep_act: list[np.ndarray] = []
+        ep_done: list[float] = []
+        ep_exp: list[int] = []
 
-        for step in range(350):
-            act = bot.act(obs)
-            next_obs, reward, term, trunc, info = env.step(act)
-            done = term or trunc
-
-            ep_obs.append(obs)
-            ep_act.append(act)
-            ep_done.append(float(done))
-
-            obs = next_obs
+        done = False
+        ep_steps = 0
+        while not done and ep_steps < 750:
+            ep_steps += 1
             collected_steps += 1
 
-            if done:
-                if info.get("exit_reached"):
-                    exits_seen += 1
-                kills_seen += int(info.get("kills", 0))
-                break
+            action, exp_id = teacher.act_with_expert(obs)
+            next_obs, reward, terminated, truncated, info = env.step(action)
+            done = bool(terminated or truncated)
+
+            if reward > 5.0 or info.get("exit_reached", False):
+                exits_seen += 1
+            if info.get("kill_count", 0) > 0:
+                kills_seen += int(info["kill_count"])
+
+            ep_obs.append(obs)
+            ep_act.append(action)
+            ep_done.append(1.0 if done else 0.0)
+            ep_exp.append(exp_id)
+            obs = next_obs
 
         env.close()
 
-        # Chunk episode into seq_len segments
-        for start_idx in range(0, len(ep_obs) - seq_len + 1, seq_len // 2):
-            seq_obs_list.append(ep_obs[start_idx : start_idx + seq_len])
-            seq_act_list.append(np.stack(ep_act[start_idx : start_idx + seq_len], axis=0))
-            seq_done_list.append(np.array(ep_done[start_idx : start_idx + seq_len], dtype=np.float32))
+        seq_buffer.extend(_chunk_episode(ep_obs, ep_act, ep_done, ep_exp, seq_len))
 
-        # Train mini-batches when enough sequences are accumulated
-        if len(seq_obs_list) >= batch_size:
-            indices = np.random.choice(len(seq_obs_list), size=batch_size, replace=False)
-            b_actions_np = np.stack([seq_act_list[i] for i in indices], axis=0)  # (B, T, 9)
-            b_dones_np = np.stack([seq_done_list[i] for i in indices], axis=0)    # (B, T)
-
-            b_actions = torch.from_numpy(b_actions_np).float().to(device)
-            b_dones = torch.from_numpy(b_dones_np).float().to(device)
+        if len(seq_buffer) >= batch_size:
+            indices = np.random.choice(len(seq_buffer), size=batch_size, replace=False)
+            b_actions = torch.from_numpy(np.stack([seq_buffer[i][1] for i in indices], axis=0)).float().to(device)
+            b_dones = torch.from_numpy(np.stack([seq_buffer[i][2] for i in indices], axis=0)).float().to(device)
+            b_exp_ids = torch.from_numpy(np.stack([seq_buffer[i][3] for i in indices], axis=0)).long().to(device)
+            b_valid = torch.from_numpy(np.stack([seq_buffer[i][4] for i in indices], axis=0)).float().to(device)
             done_mask = 1.0 - b_dones
 
-            # Collate batch sequences for model forward
             flat_obs_list = []
             for i in indices:
-                flat_obs_list.extend(seq_obs_list[i])
-            b_obs = collate_obs(flat_obs_list, device)
-
-            obs_seq = {
+                flat_obs_list.extend(seq_buffer[i][0])
+            flat_obs = collate_obs(flat_obs_list, device)
+            b_obs_seq = {
                 "rays": {
-                    "distance": b_obs["rays"]["distance"].view(batch_size, seq_len, 64),
-                    "hit_type": b_obs["rays"]["hit_type"].view(batch_size, seq_len, 64),
+                    "distance": flat_obs["rays"]["distance"].view(batch_size, seq_len, -1),
+                    "hit_type": flat_obs["rays"]["hit_type"].view(batch_size, seq_len, -1),
                 },
                 "visible_entities": {
-                    "features": b_obs["visible_entities"]["features"].view(batch_size, seq_len, 32, 5),
-                    "entity_type": b_obs["visible_entities"]["entity_type"].view(batch_size, seq_len, 32),
-                    "mask": b_obs["visible_entities"]["mask"].view(batch_size, seq_len, 32),
+                    "features": flat_obs["visible_entities"]["features"].view(batch_size, seq_len, 32, 5),
+                    "entity_type": flat_obs["visible_entities"]["entity_type"].view(batch_size, seq_len, 32),
+                    "mask": flat_obs["visible_entities"]["mask"].view(batch_size, seq_len, 32),
                 },
-                "vitals": b_obs["vitals"].view(batch_size, seq_len, 17),
+                "vitals": flat_obs["vitals"].view(batch_size, seq_len, -1),
             }
 
             model.train()
             total_loss_val = 0.0
+            gate_loss_val = 0.0
+            valid_denom = b_valid.sum().clamp(min=1.0)
 
             for _ in range(bc_epochs):
-                mem_grids, mem_lms, mem_odom = model.spatial_memory.build_sequence_inputs(
-                    obs_seq, actions_seq=b_actions, done_mask_seq=done_mask
-                )
-                feats = model.extract_features(
-                    obs_seq, mem_grid=mem_grids, mem_landmarks=mem_lms, mem_odom=mem_odom
-                )  # (B, T, hidden_dim)
-
                 init_hx = model.initial_state(batch_size=batch_size, device=device)
-                outputs = []
-                hx = init_hx
-                for t in range(seq_len):
-                    if t > 0:
-                        hx = hx * done_mask[:, t - 1].view(1, batch_size, 1)
-                    out, hx = model.gru(feats[:, t : t + 1, :], hx)
-                    outputs.append(out)
+                _, _, _, aux = model.evaluate_sequence(
+                    b_obs_seq,
+                    init_hx,
+                    b_actions,
+                    done_mask_seq=done_mask,
+                    return_aux=True,
+                )
 
-                gru_out = torch.cat(outputs, dim=1)  # (B, T, hidden_dim)
-                logits = model.actor_head(gru_out)   # (B, T, 9)
+                # 1. Blended cluster policy loss
+                blend_bce = bce_none(aux["logits"], b_actions).mean(dim=-1)
+                blend_loss = (blend_bce * b_valid).sum() / valid_denom
 
-                loss = bce_loss_fn(logits, b_actions)
+                # 2. Domain-masked active specialist expert loss
+                gather_idx = b_exp_ids.view(batch_size, seq_len, 1, 1).expand(-1, -1, 1, 9)
+                active_expert_logits = aux["expert_logits"].gather(dim=2, index=gather_idx).squeeze(2)
+                domain_mask = specialist_masks[b_exp_ids]  # (B, T, 9)
+                spec_bce = bce_none(active_expert_logits, b_actions) * domain_mask
+                spec_loss = (spec_bce.sum(dim=-1) * b_valid).sum() / (domain_mask.sum(dim=-1) * b_valid).sum().clamp(min=1.0)
+
+                # 3. Neural router situation supervision + entropy floor to keep gates soft
+                gate_summary_logits = aux["gate_logits"].mean(dim=-1)  # (B, T, 4)
+                gate_ce = ce_none(gate_summary_logits.view(-1, 4), b_exp_ids.view(-1)).view(batch_size, seq_len)
+                gate_loss = (gate_ce * b_valid).sum() / valid_denom
+                gate_ent = (aux["gate_entropy"] * b_valid).sum() / valid_denom
+
+                # 4. Anti-circling spin penalty (penalize simultaneous turn left + turn right logit inflation)
+                spin_penalty = (
+                    (torch.sigmoid(aux["logits"][..., 4]) * torch.sigmoid(aux["logits"][..., 5])) * b_valid
+                ).sum() / valid_denom
+
+                loss = blend_loss + 0.5 * spec_loss + 0.2 * gate_loss - 0.05 * gate_ent + 0.1 * spin_penalty
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
                 optimizer.step()
-                total_loss_val = float(loss.item())
+                total_loss_val = float(blend_loss.item())
+                gate_loss_val = float(gate_loss.item())
 
-            # Prune buffer to keep recent demonstrations
-            if len(seq_obs_list) > 256:
-                seq_obs_list = seq_obs_list[-128:]
-                seq_act_list = seq_act_list[-128:]
-                seq_done_list = seq_done_list[-128:]
+            if len(seq_buffer) > 256:
+                seq_buffer = seq_buffer[-128:]
 
             sps = int(collected_steps / max(0.1, time.time() - t0))
             if collected_steps % 4000 < 350 or collected_steps >= steps:
                 print(
                     f"BC Step {collected_steps:>6d}/{steps} | SPS {sps:>4d} | "
-                    f"BCE Loss: {total_loss_val:.4f} | Exits: {exits_seen} | Kills: {kills_seen}"
+                    f"BCE {total_loss_val:.4f} | GateCE {gate_loss_val:.4f} | "
+                    f"Exits {exits_seen} | Kills {kills_seen}"
                 )
 
-    # Save to submission weights
     sub_weights = REPO_ROOT / "submission" / "weights" / "model.pt"
     sub_weights.parent.mkdir(parents=True, exist_ok=True)
     _atomic_torch_save(model.state_dict(), sub_weights)
 
-    # Save initial checkpoint for PPO resumption
     ckpt_dir = REPO_ROOT / "checkpoints"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     _atomic_torch_save(
         {
+            "arch": "cluster",
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "global_step": 0,
@@ -352,12 +449,12 @@ def collect_and_pretrain(
         },
         ckpt_dir / "ckpt_latest.pt",
     )
-    print(f"\n=======================================================")
-    print(f"  BC Pretraining Complete!")
+    print("\n=======================================================")
+    print("  BC Pretraining Complete!")
     print(f"  Total Steps: {collected_steps:,} | Exits: {exits_seen} | Kills: {kills_seen}")
     print(f"  Weights saved to: {sub_weights}")
     print(f"  Checkpoint saved to: {ckpt_dir / 'ckpt_latest.pt'}")
-    print(f"=======================================================\n")
+    print("=======================================================\n")
 
 
 def main():
