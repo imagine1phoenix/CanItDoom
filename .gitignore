@@ -222,3 +222,7 @@ _vizdoom.ini
 
 # Local validator / scorer artifacts
 *.lmp
+
+# macOS system files
+.DS_Store
+
