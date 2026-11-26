@@ -18,6 +18,13 @@ import torch
 import torch.nn as nn
 from torch.distributions import Bernoulli
 
+from submission.memory import (
+    EgoSpatialMemory,
+    MemoryState,
+    SpatialMemoryEncoder,
+    mask_memory_state,
+)
+
 
 class LandmarkOdometryEncoder(nn.Module):
     """V1 ego-centric landmark and odometry feature extractor.
@@ -186,10 +193,12 @@ class DoomActorCritic(nn.Module):
         self.entity_encoder = EntityEncoder(out_dim=64)
         self.vitals_encoder = VitalsEncoder(out_dim=64)
         self.landmark_encoder = LandmarkOdometryEncoder(num_rays=64, out_dim=32)
+        self.spatial_memory = EgoSpatialMemory(num_rays=64, ray_range=1024.0)
+        self.spatial_encoder = SpatialMemoryEncoder(out_dim=64)
 
-        # Total fused feature dim: 128 + 64 + 64 + 32 = 288
+        # Total fused feature dim: 128 + 64 + 64 + 32 + 64 = 352
         self.fusion = nn.Sequential(
-            nn.Linear(288, hidden_dim),
+            nn.Linear(352, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.ReLU(),
         )
@@ -221,8 +230,14 @@ class DoomActorCritic(nn.Module):
         nn.init.orthogonal_(self.critic_head.weight, gain=1.0)
         nn.init.zeros_(self.critic_head.bias)
 
-    def extract_features(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Extract and fuse spatial and scalar observations."""
+    def extract_features(
+        self,
+        obs: dict[str, torch.Tensor],
+        mem_grid: torch.Tensor | None = None,
+        mem_landmarks: torch.Tensor | None = None,
+        mem_odom: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Extract and fuse spatial, scalar, and V1 memory observations."""
         ray_feat = self.ray_encoder(obs["rays"]["distance"], obs["rays"]["hit_type"])
         ent_feat = self.entity_encoder(
             obs["visible_entities"]["features"],
@@ -235,13 +250,68 @@ class DoomActorCritic(nn.Module):
             obs["rays"]["hit_type"],
             obs["vitals"],
         )
+        if mem_grid is None or mem_landmarks is None or mem_odom is None:
+            # Fallback when called statelessly without pre-updated memory tensors
+            lead_shape = obs["vitals"].shape[:-1]
+            flat_obs = {
+                "rays": {
+                    "distance": obs["rays"]["distance"].reshape(-1, 64),
+                    "hit_type": obs["rays"]["hit_type"].reshape(-1, 64),
+                },
+                "visible_entities": {
+                    "features": obs["visible_entities"]["features"].reshape(-1, 32, 5),
+                    "entity_type": obs["visible_entities"]["entity_type"].reshape(-1, 32),
+                    "mask": obs["visible_entities"]["mask"].reshape(-1, 32),
+                },
+                "vitals": obs["vitals"].reshape(-1, 17),
+            }
+            m0 = self.spatial_memory.initial_state(flat_obs["vitals"].shape[0], device=flat_obs["vitals"].device)
+            m1 = self.spatial_memory.step_update(flat_obs, m0)
+            mem_grid = m1.grid.view(*lead_shape, 5, 32, 32)
+            mem_landmarks = m1.landmarks.view(*lead_shape, 12, 6)
+            mem_odom = m1.odom_pose.view(*lead_shape, 4)
 
-        fused = torch.cat([ray_feat, ent_feat, vit_feat, lm_feat], dim=-1)
+        mem_feat = self.spatial_encoder(mem_grid, mem_landmarks, mem_odom)
+
+        fused = torch.cat([ray_feat, ent_feat, vit_feat, lm_feat, mem_feat], dim=-1)
         return self.fusion(fused)
 
     def initial_state(self, batch_size: int = 1, device: torch.device | str = "cpu") -> torch.Tensor:
         """Returns zero hidden state for the GRU."""
         return torch.zeros(1, batch_size, self.hidden_dim, device=device)
+
+    def initial_memory(self, batch_size: int = 1, device: torch.device | str = "cpu") -> MemoryState:
+        """Returns zeroed V1 relative odometry map and landmark slot memory."""
+        return self.spatial_memory.initial_state(batch_size=batch_size, device=device)
+
+    def step_with_memory(
+        self,
+        obs: dict[str, torch.Tensor],
+        hx: torch.Tensor,
+        mem_state: MemoryState,
+        prev_action: torch.Tensor | None = None,
+        deterministic: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, MemoryState]:
+        """Single decision step updating both V1 spatial memory and GRU state."""
+        next_mem = self.spatial_memory.step_update(obs, mem_state, prev_action=prev_action)
+        features = self.extract_features(
+            obs,
+            mem_grid=next_mem.grid,
+            mem_landmarks=next_mem.landmarks,
+            mem_odom=next_mem.odom_pose,
+        ).unsqueeze(1)
+
+        out, next_hx = self.gru(features, hx)
+        out = out.squeeze(1)
+
+        logits = self.actor_head(out)
+        value = self.critic_head(out).squeeze(-1)
+
+        dist = Bernoulli(logits=logits)
+        action = (logits > 0.0).float() if deterministic else dist.sample()
+        log_prob = dist.log_prob(action).sum(dim=-1)
+        entropy = dist.entropy().sum(dim=-1)
+        return action, log_prob, entropy, value, next_hx, next_mem
 
     def step(
         self,
@@ -249,34 +319,11 @@ class DoomActorCritic(nn.Module):
         hx: torch.Tensor,
         deterministic: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Single decision step for agent acting.
-        
-        Returns:
-            action: (B, 9) binary action tensor
-            log_prob: (B,) log probability of the sampled action
-            entropy: (B,) entropy of the action distribution
-            value: (B,) critic state-value estimate
-            next_hx: (1, B, hidden_dim) updated recurrent state
-        """
-        # Ensure batch dimension
-        features = self.extract_features(obs)  # (B, hidden_dim)
-        features = features.unsqueeze(1)       # (B, 1, hidden_dim) for GRU
-
-        out, next_hx = self.gru(features, hx)
-        out = out.squeeze(1)  # (B, hidden_dim)
-
-        logits = self.actor_head(out)
-        value = self.critic_head(out).squeeze(-1)
-
-        dist = Bernoulli(logits=logits)
-        if deterministic:
-            action = (logits > 0.0).float()
-        else:
-            action = dist.sample()
-
-        log_prob = dist.log_prob(action).sum(dim=-1)
-        entropy = dist.entropy().sum(dim=-1)
-
+        """Single decision step for stateless-memory callers."""
+        mem0 = self.initial_memory(batch_size=obs["vitals"].shape[0], device=obs["vitals"].device)
+        action, log_prob, entropy, value, next_hx, _ = self.step_with_memory(
+            obs, hx, mem0, prev_action=None, deterministic=deterministic
+        )
         return action, log_prob, entropy, value, next_hx
 
     def evaluate_sequence(
@@ -285,21 +332,26 @@ class DoomActorCritic(nn.Module):
         init_hx: torch.Tensor,
         actions_seq: torch.Tensor,
         done_mask_seq: torch.Tensor | None = None,
+        init_mem: MemoryState | None = None,
+        mem_grids_seq: torch.Tensor | None = None,
+        mem_landmarks_seq: torch.Tensor | None = None,
+        mem_odom_seq: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Sequence forward pass for PPO training updates.
-        
-        Args:
-            obs_seq: dict of batched sequence observations (B, T, ...)
-            init_hx: initial hidden state (1, B, hidden_dim)
-            actions_seq: (B, T, 9) actions taken
-            done_mask_seq: (B, T) 0.0 when episode done, 1.0 otherwise (optional for sequence resets)
-            
-        Returns:
-            log_probs: (B, T)
-            entropy: (B, T)
-            values: (B, T)
-        """
-        features = self.extract_features(obs_seq)  # (B, T, hidden_dim)
+        """Sequence forward pass for PPO training updates."""
+        if mem_grids_seq is None or mem_landmarks_seq is None or mem_odom_seq is None:
+            mem_grids_seq, mem_landmarks_seq, mem_odom_seq = self.spatial_memory.build_sequence_inputs(
+                obs_seq,
+                actions_seq=actions_seq,
+                init_mem=init_mem,
+                done_mask_seq=done_mask_seq,
+            )
+
+        features = self.extract_features(
+            obs_seq,
+            mem_grid=mem_grids_seq,
+            mem_landmarks=mem_landmarks_seq,
+            mem_odom=mem_odom_seq,
+        )  # (B, T, hidden_dim)
         
         if done_mask_seq is not None:
             # Step-by-step through sequence with done mask resets
