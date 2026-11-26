@@ -34,16 +34,11 @@ Dia guarantees that our agent's performance is rigorously measured on held-out m
 ## 2. Granular Task Checklist
 
 - [x] **Task D.1 — Organizer Audit Log:** Fill initial clarifications table in `docs/ORGANIZER_CLARIFICATIONS.md`. *(Done)*
-- [ ] **Task D.2 — Evaluation Scoring Script (`train/evaluate.py`):** Build offline scorer calculating official competition metric breakdown.
-  - *Done when:* Command exports a structured CSV on test maps by 21:00 Thu.
-- [ ] **Task D.3 — PDF Brief Draft:** Complete full 2-page design brief outline in Markdown/LaTeX.
-  - *Done when:* Structural draft completed by 00:00 Fri.
-- [ ] **Task D.4 — Greedy vs. Sampled Policy Study:** Run evaluation sweep comparing greedy vs. stochastic actions on Checkpoint G3.
-  - *Done when:* Results and recommendation delivered to Prit by 08:00 Fri.
-- [ ] **Task D.5 — Demo Video Production:** Capture 3 highlight clips using OpenCV showing combat, door navigation, and exit completion.
-  - *Done when:* Videos ready for presentation by 10:00 Fri.
-- [ ] **Task D.6 — Final PDF Compilation:** Insert final empirical statistics and charts into 2-page PDF.
-  - *Done when:* PDF exported and reviewed by 11:00 Fri.
+- [x] **Task D.2 — Evaluation Scoring Script (`train/evaluate.py`):** Build offline scorer calculating official competition metric breakdown. *(Done)*
+- [x] **Task D.3 — PDF Brief Draft:** Complete full 2-page design brief outline in Markdown/LaTeX. *(Done)*
+- [x] **Task D.4 — Greedy vs. Sampled Policy Study:** Run evaluation sweep comparing greedy vs. stochastic actions on Checkpoint G3. *(Done)*
+- [x] **Task D.5 — Demo Video Production:** Capture 3 highlight clips using OpenCV showing combat, door navigation, and exit completion. *(Done)*
+- [x] **Task D.6 — Final PDF Compilation:** Insert final empirical statistics and charts into 2-page PDF. *(Done)*
 
 ---
 

@@ -617,6 +617,42 @@ def print_summary(
     return summary
 
 
+def print_brief_tables(summary: dict[str, Any]) -> None:
+    """Print formatted Markdown and LaTeX tables for docs/BRIEF.md and docs/brief.tex."""
+    TIER_LABELS = {
+        "1": "Tier 1 (Nav/Combat)",
+        "2": "Tier 2 (Multi-Room)",
+        "3": "Tier 3 (Key/Lock)",
+        "4": "Tier 4 (Progression)",
+        "5": "Held-Out Freedoom 2",
+    }
+    for label, pdata in summary.get("policies", {}).items():
+        by_tier = pdata.get("by_tier", {})
+        overall = pdata.get("overall", {})
+        if not by_tier:
+            continue
+
+        print(f"\n--- Brief Table 4.1 for Policy: {label} (Markdown) ---")
+        print("| Tier / Split | Maps | Exit Rate | Mean Keys | Mean Doors | Unique Cells | Mean Kills | Mean Damage | Death Rate |")
+        print("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
+        for t_key in ("1", "2", "3", "4", "5"):
+            if t_key in by_tier:
+                d = by_tier[t_key]
+                name = TIER_LABELS.get(t_key, f"Tier {t_key}")
+                print(f"| {name} | {d['episodes']} | {d['exit_rate_pct']:.1f}% | {d['mean_keys']:.2f} | {d['mean_doors']:.2f} | {d['mean_cells']:.1f} | {d['mean_kills']:.2f} | {d['mean_damage']:.1f} | {d['death_rate_pct']:.1f}% |")
+        if overall:
+            print(f"| **Overall** | {overall['episodes']} | {overall['exit_rate_pct']:.1f}% | {overall['mean_keys']:.2f} | {overall['mean_doors']:.2f} | {overall['mean_cells']:.1f} | {overall['mean_kills']:.2f} | {overall['mean_damage']:.1f} | {overall['death_rate_pct']:.1f}% |")
+
+        print(f"\n--- Brief Table 1 for Policy: {label} (LaTeX snippet) ---")
+        for t_key in ("1", "2", "3", "4", "5"):
+            if t_key in by_tier:
+                d = by_tier[t_key]
+                name = TIER_LABELS.get(t_key, f"Tier {t_key}")
+                print(f"{name:<20} & {d['episodes']:<4} & {d['exit_rate_pct']:>5.1f}\\% & {d['mean_keys']:>5.2f} & {d['mean_doors']:>5.2f} & {d['mean_cells']:>5.1f} & {d['mean_kills']:>5.2f} & {d['mean_damage']:>5.1f} & {d['death_rate_pct']:>5.1f}\\% \\\\")
+        if overall:
+            print(f"\\midrule\n\\textbf{{Overall}}        & {overall['episodes']:<4} & {overall['exit_rate_pct']:>5.1f}\\% & {overall['mean_keys']:>5.2f} & {overall['mean_doors']:>5.2f} & {overall['mean_cells']:>5.1f} & {overall['mean_kills']:>5.2f} & {overall['mean_damage']:>5.1f} & {overall['death_rate_pct']:>5.1f}\\% \\\\")
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--checkpoint", type=Path, default=None, help="Path to saved model weights (.pt).")
@@ -653,6 +689,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Optional path to write aggregated per-policy, per-tier, and timing compliance JSON.",
+    )
+    parser.add_argument(
+        "--print-tables",
+        action="store_true",
+        help="Print formatted Markdown and LaTeX tables directly for docs/BRIEF.md and docs/brief.tex.",
     )
     return parser
 
@@ -745,6 +786,8 @@ def main(argv: list[str] | None = None) -> int:
         args.summary_json.parent.mkdir(parents=True, exist_ok=True)
         args.summary_json.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
         print(f"Saved summary JSON to {args.summary_json}")
+    if args.print_tables:
+        print_brief_tables(summary)
     print(f"\nSaved {len(all_rows)} row(s) to {args.output}")
     return 0
 

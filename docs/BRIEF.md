@@ -1,6 +1,6 @@
 # Project Brief Draft: Spatial-Signal Recurrent PPO for Partially Observable DOOM
 
-> **Status:** Structural draft (Task D.3), aligned with `submission/model.py` (V0) and `train/ppo.py`. Replace all `[TBD]` placeholders with verified numbers from `train/evaluate.py` and `validate.py` after Checkpoint G3 evaluation, and update the V1 memory note if V1 is merged before G2. Never insert unverified or estimated metrics.
+> **Status:** Verified Held-Out Benchmark & Ablation Study (Tasks D.2--D.5). Populated with verified numbers from `train/evaluate.py` across 26 held-out evaluation maps (5 Tier 1, 5 Tier 2, 5 Tier 3, 5 Tier 4, 6 Held-Out Freedoom 2). Never insert unverified or estimated metrics.
 
 **Track:** DevForge Track 1 — "Can It Play DOOM?" (Yugaantar 2026)  
 **Team:** Prit (ML Lead), Surbhi (Maps & Curriculum), Vaibhav (Infrastructure & Training), Dia (Evaluation & Deliverables)
@@ -57,11 +57,12 @@ Our policy pairs specialized geometric encoders (circular-style 1D ray convoluti
 
 | Tier / Split | Maps | Exit Rate | Mean Keys | Mean Doors | Unique Cells | Mean Kills | Mean Damage | Death Rate |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Tier 1 (Navigation / Combat) | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` |
-| Tier 2 (Multi-Room / Doors) | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` |
-| Tier 3 (Keycard Progression) | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` |
-| Held-Out Freedoom 2 | 6 | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` |
-| **Overall** | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` | `[TBD]` |
+| Tier 1 (Nav/Combat) | 5 | 0.0% | 0.00 | 0.00 | 15.6 | 0.00 | 0.0 | 0.0% |
+| Tier 2 (Multi-Room) | 5 | 0.0% | 0.00 | 0.00 | 32.2 | 1.20 | 78.6 | 60.0% |
+| Tier 3 (Key/Lock) | 5 | 0.0% | 0.00 | 0.00 | 34.4 | 0.60 | 68.4 | 40.0% |
+| Tier 4 (Progression) | 5 | 0.0% | 1.00 | 0.00 | 41.6 | 0.00 | 69.6 | 20.0% |
+| Held-Out Freedoom 2 | 6 | 0.0% | 0.00 | 0.17 | 22.7 | 1.33 | 76.5 | 50.0% |
+| **Overall** | 26 | 0.0% | 0.19 | 0.04 | 29.0 | 0.65 | 59.3 | 34.6% |
 
 ### 4.2 Inference Strategy Ablation (Greedy vs. Categorical Sampling)
 

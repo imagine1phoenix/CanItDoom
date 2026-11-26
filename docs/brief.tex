@@ -52,7 +52,7 @@ Instead of encoding raw $160\times 120$ RGB/depth pixels with a heavy CNN, our p
   \item \textbf{5-Stage UDMF Curriculum (\texttt{train/mapgen.py}):} (1) Open rooms/corridors, (2) combat arenas, (3) multi-room doors, (4) keycard + locked door chains, (5) mix of Stages 1--4 and Freedoom 2 training maps (6 Freedoom 2 maps strictly held out).
 \end{itemize}
 
-\section*{4. Empirical Results \textnormal{\small(Populate after Checkpoint G3)}}
+\section*{4. Empirical Results \textnormal{\small(Verified Held-Out Suite \& System Benchmarks)}}
 
 \begin{table*}[t]
 \centering
@@ -61,12 +61,13 @@ Instead of encoding raw $160\times 120$ RGB/depth pixels with a heavy CNN, our p
 \toprule
 \textbf{Eval Suite} & \textbf{Maps} & \textbf{Exit\%} & \textbf{Mean Keys} & \textbf{Mean Doors} & \textbf{Unique Cells} & \textbf{Mean Kills} & \textbf{Mean Dmg} & \textbf{Deaths\%} \\
 \midrule
-Tier 1 (Nav/Combat) & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] \\
-Tier 2 (Multi-Room) & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] \\
-Tier 3 (Key/Lock)   & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] \\
-Held-Out Freedoom 2 & 6     & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] \\
+Tier 1 (Nav/Combat)  & 5    &   0.0\% &  0.00 &  0.00 &  15.6 &  0.00 &   0.0 &   0.0\% \\
+Tier 2 (Multi-Room)  & 5    &   0.0\% &  0.00 &  0.00 &  32.2 &  1.20 &  78.6 &  60.0\% \\
+Tier 3 (Key/Lock)    & 5    &   0.0\% &  0.00 &  0.00 &  34.4 &  0.60 &  68.4 &  40.0\% \\
+Tier 4 (Progression) & 5    &   0.0\% &  1.00 &  0.00 &  41.6 &  0.00 &  69.6 &  20.0\% \\
+Held-Out Freedoom 2  & 6    &   0.0\% &  0.00 &  0.17 &  22.7 &  1.33 &  76.5 &  50.0\% \\
 \midrule
-\textbf{Overall}    & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] & [TBD] \\
+\textbf{Overall}        & 26   &   0.0\% &  0.19 &  0.04 &  29.0 &  0.65 &  59.3 &  34.6\% \\
 \bottomrule
 \end{tabular}
 \caption{Unshaped held-out metrics from \texttt{train/evaluate.py}.}
