@@ -28,14 +28,12 @@ class DoomAgent:
 
         self.model = DoomActorCritic(num_actions=action_space.shape[0])
 
-        # Attempt loading checkpoint if present
         checkpoint_path = WEIGHTS_DIR / "model.pt"
         if checkpoint_path.is_file():
             is_lfs_pointer = False
             try:
                 with open(checkpoint_path, "rb") as f:
-                    header = f.read(100)
-                    if header.startswith(b"version https://git-lfs"):
+                    if f.read(100).startswith(b"version https://git-lfs"):
                         is_lfs_pointer = True
             except OSError:
                 pass
@@ -55,6 +53,7 @@ class DoomAgent:
         self.model.eval()
 
         self.hx: torch.Tensor | None = None
+        self.prev_action: torch.Tensor | None = None
         self.deterministic: bool = False
         self.temperature: float = 0.2
 
@@ -64,15 +63,17 @@ class DoomAgent:
         self.temperature = max(1e-4, float(temperature))
 
     def reset(self) -> None:
-        """Called before every map. Clear recurrent state and trackers."""
+        """Called before every map. Clear recurrent state and previous-action buffer."""
         self.hx = None
+        self.prev_action = None
 
     def act(self, observation: dict) -> np.ndarray:
         """Return a MultiBinary action: int array of shape (9,) with values in {0, 1}."""
         if self.hx is None:
             self.hx = self.model.initial_state(batch_size=1, device=self.device)
+        if self.prev_action is None:
+            self.prev_action = self.model.initial_prev_action(batch_size=1, device=self.device)
 
-        # Prepare ego-centric observations as batch-1 tensors on the target device
         obs_tensor = {
             "rays": {
                 "distance": torch.from_numpy(observation["rays"]["distance"]).unsqueeze(0).to(self.device),
@@ -87,12 +88,13 @@ class DoomAgent:
         }
 
         with torch.no_grad():
-            if self.deterministic:
-                action, _, _, _, self.hx = self.model.step(obs_tensor, self.hx, deterministic=True)
-            else:
-                features = self.model.extract_features(obs_tensor).unsqueeze(1)
-                out, self.hx = self.model.gru(features, self.hx)
-                logits = self.model.actor_head(out.squeeze(1)) / self.temperature
-                action = torch.distributions.Bernoulli(logits=logits).sample()
+            action, _, _, _, self.hx = self.model.step(
+                obs_tensor,
+                self.hx,
+                prev_action=self.prev_action,
+                deterministic=self.deterministic,
+                temperature=self.temperature,
+            )
+            self.prev_action = action.detach()
 
         return action.squeeze(0).cpu().numpy().astype(np.int8)

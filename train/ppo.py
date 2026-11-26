@@ -226,6 +226,7 @@ def train_ppo(
     batch_size: int = 64,
     ent_coef: float = 0.01,
     vf_coef: float = 0.5,
+    gate_ent_coef: float = 0.005,
     device_name: str = "cpu",
     save_dir: str = "submission/weights",
 ) -> None:
@@ -244,8 +245,9 @@ def train_ppo(
     recent_returns = deque(maxlen=20)
     recent_lens = deque(maxlen=20)
 
-    # Initial recurrent state: (1, num_envs, 256)
+    # Initial recurrent state and previous-action tracker
     hx = model.initial_state(batch_size=num_envs, device=device)
+    prev_action = model.initial_prev_action(batch_size=num_envs, device=device)
 
     num_iterations = total_steps // (rollout_len * num_envs)
     global_step = 0
@@ -257,6 +259,7 @@ def train_ppo(
         # Rollout storage
         mb_obs = []
         mb_actions = []
+        mb_prev_actions = []
         mb_log_probs = []
         mb_rewards = []
         mb_dones = []
@@ -268,14 +271,18 @@ def train_ppo(
         for _ in range(rollout_len):
             global_step += num_envs
             tensor_obs = collate_obs(obs_batch, device)
+            mb_prev_actions.append(prev_action.clone())
 
             with torch.no_grad():
-                action, log_prob, _, val, hx = model.step(tensor_obs, hx, deterministic=False)
+                action, log_prob, _, val, hx = model.step(
+                    tensor_obs, hx, prev_action=prev_action, deterministic=False
+                )
 
             actions_np = action.cpu().numpy().astype(np.int8)
             next_obs = []
             rewards = []
             dones = []
+            next_prev_action = action.clone()
 
             for i, env in enumerate(envs):
                 o, r, done, _, info = env.step(actions_np[i])
@@ -285,6 +292,7 @@ def train_ppo(
 
                 if done:
                     hx[:, i, :] = 0.0
+                    next_prev_action[i] = 0.0
                     recent_returns.append(info["ep_return"])
                     recent_lens.append(info["ep_len"])
 
@@ -295,12 +303,13 @@ def train_ppo(
             mb_dones.append(torch.tensor(dones, device=device, dtype=torch.float32))
             mb_values.append(val)
 
+            prev_action = next_prev_action
             obs_batch = next_obs
 
         # Bootstrap value for GAE
         final_obs = collate_obs(obs_batch, device)
         with torch.no_grad():
-            _, _, _, next_value, _ = model.step(final_obs, hx)
+            _, _, _, next_value, _ = model.step(final_obs, hx, prev_action=prev_action)
 
         # Compute GAE
         advantages = torch.zeros(rollout_len, num_envs, device=device)
@@ -316,11 +325,12 @@ def train_ppo(
 
         # Flatten rollout for optimization
         # Re-pack tensors into sequences of shape (num_envs, rollout_len, ...)
-        b_actions = torch.stack(mb_actions, dim=1)  # (N, T, 9)
-        b_returns = returns.transpose(0, 1)         # (N, T)
-        b_advantages = advantages.transpose(0, 1)   # (N, T)
+        b_actions = torch.stack(mb_actions, dim=1)            # (N, T, 9)
+        b_prev_actions = torch.stack(mb_prev_actions, dim=1)  # (N, T, 9)
+        b_returns = returns.transpose(0, 1)                   # (N, T)
+        b_advantages = advantages.transpose(0, 1)             # (N, T)
         b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
-        b_old_log_probs = torch.stack(mb_log_probs, dim=1)  # (N, T)
+        b_old_log_probs = torch.stack(mb_log_probs, dim=1)    # (N, T)
 
         # Structure sequence observation dictionary
         b_obs_seq = {
@@ -339,10 +349,17 @@ def train_ppo(
 
         # Optimization epochs
         model.train()
+        last_gates = None
         for epoch in range(epochs):
-            new_log_probs, entropy, new_values = model.evaluate_sequence(
-                b_obs_seq, init_hx, b_actions, done_mask_seq=(1.0 - b_dones_seq)
+            new_log_probs, entropy, new_values, aux = model.evaluate_sequence(
+                b_obs_seq,
+                init_hx,
+                b_actions,
+                done_mask_seq=(1.0 - b_dones_seq),
+                prev_actions_seq=b_prev_actions,
+                return_aux=True,
             )
+            last_gates = aux["gate_probs"].detach().mean(dim=(0, 1))
 
             # Ratio and surrogate loss
             ratio = torch.exp(new_log_probs - b_old_log_probs)
@@ -350,13 +367,14 @@ def train_ppo(
             surr2 = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * b_advantages
             policy_loss = -torch.min(surr1, surr2).mean()
 
-            # Value loss with clipping
+            # Value loss
             value_loss = 0.5 * ((new_values - b_returns) ** 2).mean()
 
-            # Entropy bonus
+            # Policy and router entropy bonuses
             ent_loss = -entropy.mean()
+            gate_ent_loss = -aux["gate_entropy"].mean()
 
-            total_loss = policy_loss + vf_coef * value_loss + ent_coef * ent_loss
+            total_loss = policy_loss + vf_coef * value_loss + ent_coef * ent_loss + gate_ent_coef * gate_ent_loss
 
             optimizer.zero_grad()
             total_loss.backward()
@@ -368,25 +386,23 @@ def train_ppo(
         sps = int(global_step / max(0.1, elapsed))
         mean_ret = np.mean(recent_returns) if recent_returns else 0.0
         mean_len = np.mean(recent_lens) if recent_lens else 0.0
+        gate_str = (
+            f" | Gates[N={last_gates[0]:.2f},E={last_gates[1]:.2f},D={last_gates[2]:.2f},P={last_gates[3]:.2f}]"
+            if last_gates is not None
+            else ""
+        )
 
         if iteration % 5 == 0 or iteration == num_iterations:
             print(
                 f"Iter {iteration:03d}/{num_iterations:03d} | Steps: {global_step:06d} | "
                 f"SPS: {sps} | Return: {mean_ret:+.2f} | Length: {mean_len:.1f} | "
-                f"Loss: {total_loss.item():.4f} (pi={policy_loss.item():.4f}, v={value_loss.item():.4f})"
+                f"Loss: {total_loss.item():.4f} (pi={policy_loss.item():.4f}, v={value_loss.item():.4f}){gate_str}"
             )
 
-        # Save milestone checkpoint
+        # Save milestone checkpoint (weights only for compact LFS footprint)
         if iteration % 10 == 0 or iteration == num_iterations:
             ckpt_file = save_path / "model.pt"
-            torch.save(
-                {
-                    "model_state_dict": model.state_dict(),
-                    "global_step": global_step,
-                    "mean_return": mean_ret,
-                },
-                ckpt_file,
-            )
+            torch.save(model.state_dict(), ckpt_file)
 
     print(f"Training completed in {elapsed:.1f}s. Final weights saved to {save_path / 'model.pt'}.")
 
